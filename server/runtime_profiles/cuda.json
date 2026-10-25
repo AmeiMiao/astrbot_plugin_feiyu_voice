@@ -1,0 +1,12 @@
+{
+  "schema": "feiyu-environment-preset-v1",
+  "backend": "cuda",
+  "python": "3.11",
+  "torch_index": "https://download.pytorch.org/whl/cu128",
+  "engines": {
+    "rvc": {"torch": "2.11.0+cu128", "torchaudio": "2.11.0+cu128", "precision": "float32", "f0_device": "model", "torchcodec": "0.11.0+cpu"},
+    "tts": {"torch": "2.11.0+cu128", "torchaudio": "2.11.0+cu128", "precision": "float32", "torchcodec": "0.11.0+cpu"},
+    "svs": {"torch": "2.8.0+cu128", "torchaudio": "2.8.0+cu128", "precision": "float16"}
+  },
+  "hardware_validation": "NVIDIA regression required for each installation"
+}

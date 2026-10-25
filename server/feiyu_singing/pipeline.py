@@ -46,6 +46,8 @@ def linux_path(path):
 
 def runtime_command(runtime, script, *arguments):
     command = [runtime["python"], "-B", linux_path(script), *map(str, arguments)]
+    if runtime.get("python_library_dir"):
+        command[:0] = ["env", "LD_LIBRARY_PATH=" + runtime["python_library_dir"]]
     if os.name == "nt":
         command = ["wsl.exe", "-d", runtime["distribution"], "-e", *command]
     return command
@@ -137,6 +139,14 @@ def synthesize(score, *, lyrics=None, lyrics_file=None, pinyin_file=None, track=
     compiled = compile_score(notes, duration, lyrics, pinyin, transpose, segment_seconds)
     cfg_path = resolve(config or "configs/singing.json")
     cfg = load(cfg_path)
+    if cfg.get("svs_runtime_profile"):
+        from feiyu_runtime.common import validate_profile
+        profile_path = resolve(cfg["svs_runtime_profile"])
+        if cfg.get("svs_runtime_profile_sha256") and sha(profile_path) != cfg["svs_runtime_profile_sha256"]:
+            raise ValueError("SVS runtime profile changed after submission")
+        cfg["svs_runtime"] = validate_profile(load(profile_path))
+        if cfg["svs_runtime"]["engine"] != "svs":
+            raise ValueError("SVS runtime profile engine mismatch")
     package = resolve(cfg["rvc_package"])
     manifest = load(package / "manifest.json")
     if manifest["id"] != cfg["rvc_package_id"]:
@@ -200,7 +210,7 @@ def synthesize(score, *, lyrics=None, lyrics_file=None, pinyin_file=None, track=
                    target=dict(path=linux_path(folder / "target_metadata.json"), sha256=result["target_metadata_sha256"]),
                    output_dir=linux_path(svs), frames=compiled["frames"],
                    parameters=dict(control="score", auto_shift=False, pitch_shift=0,
-                                   n_steps=32, cfg=1., fp16=True, seed=seed))
+                                   n_steps=32, cfg=1., fp16=cfg["svs_runtime"].get("precision", "float16") == "float16", seed=seed))
         save(svs / "job.json", job)
         result["status"] = "running_svs"
         save(folder / "result.json", result)
@@ -216,7 +226,22 @@ def synthesize(score, *, lyrics=None, lyrics_file=None, pinyin_file=None, track=
         print(f"正在使用 {manifest['id']} 转换音色…", flush=True)
         rvc = folder / "rvc"
         public_rvc = manifest["schema"] == "feiyu-rvc-release-v1"
-        command = runtime_command(cfg["rvc_runtime"], package / ("run_rvc.py" if public_rvc else "run_cover.py"),
+        rvc_script = package / ("run_rvc.py" if public_rvc else "run_cover.py")
+        rvc_prefix = []
+        if cfg.get("rvc_runtime_profile"):
+            if not public_rvc:
+                raise ValueError("Managed runtime requires public FeiyuVoice-RVC v1")
+            profile = load(resolve(cfg["rvc_runtime_profile"]))
+            from feiyu_runtime.common import validate_profile
+            validate_profile(profile)
+            if profile["engine"] != "rvc":
+                raise ValueError("RVC runtime profile engine mismatch")
+            save(folder / "rvc_runtime_profile.json", profile)
+            cfg["rvc_runtime"] = profile
+            rvc_script = ROOT / "feiyu_runtime/worker.py"
+            rvc_prefix = ["--kind", "rvc", "--package", linux_path(package),
+                          "--profile", linux_path(folder / "rvc_runtime_profile.json")]
+        command = runtime_command(cfg["rvc_runtime"], rvc_script, *rvc_prefix,
                                   "--input", linux_path(svs / "generated.wav"), "--output-dir", linux_path(rvc))
         if not public_rvc:
             command += ["--project-root", linux_path(ROOT)]

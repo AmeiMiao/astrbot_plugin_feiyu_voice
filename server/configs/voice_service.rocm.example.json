@@ -1,0 +1,21 @@
+{
+  "schema": "feiyu-voice-service-v1",
+  "data_dir": ".runtime/voice-service",
+  "max_queue": 16,
+  "max_upload_mb": 128,
+  "tts": {
+    "feiyu": {
+      "engine": "cosyvoice3_release",
+      "package": "models/FeiyuVoice-CosyVoice3",
+      "runtime_profile": "configs/runtime.tts.rocm.local.json"
+    }
+  },
+  "rvc": {
+    "feiyu": {
+      "engine": "feiyu_rvc_release",
+      "package": "models/FeiyuVoice-RVC",
+      "runtime_profile": "configs/runtime.rvc.rocm.local.json"
+    }
+  },
+  "singing": null
+}

@@ -23,9 +23,11 @@ def execute(job):
     folder = Path(job["job_directory"])
     backend, request, kind = job["backend"], job["request"], job["kind"]
     package = Path(backend["package"])
+    managed = backend.get("adapter") == "managed"
+    runtime_path = Path(backend.get("runtime_path", package / "runtime.local.json"))
     if (
         sha(package / "manifest.json") != backend["manifest_sha256"]
-        or sha(package / "runtime.local.json") != backend["runtime_sha256"]
+        or sha(runtime_path) != backend["runtime_sha256"]
     ):
         raise ValueError(
             "Package configuration changed after submission; reload service and resubmit"
@@ -43,6 +45,17 @@ def execute(job):
     )
     if sha(script) != backend["script_sha256"]:
         raise ValueError("Package adapter changed after submission")
+    if managed:
+        from feiyu_voice_service.registry import adapter_digest
+        if adapter_digest() != backend["adapter_sha256"]:
+            raise ValueError("Managed adapter changed after submission")
+        profile_snapshot = folder / "runtime_profile.json"
+        save(profile_snapshot, backend["runtime"])
+        script = ROOT / "feiyu_runtime/worker.py"
+        prefix = ["--kind", "tts" if kind == "speech" else "rvc", "--package", linux_path(package),
+                  "--profile", linux_path(profile_snapshot)]
+    else:
+        prefix = []
     if kind == "speech":
         runtime = backend["runtime"]
         task = folder / "tts_request.json"
@@ -55,14 +68,9 @@ def execute(job):
             ),
         )
         # Some standalone Python builds require an explicit library search path.
-        rt = dict(distribution=runtime["distribution"], python=runtime["python"])
-        command = runtime_command(rt, script, "--request", linux_path(task))
-        if runtime.get("python_library_dir"):
-            position = command.index(runtime["python"])
-            command[position:position] = [
-                "env",
-                "LD_LIBRARY_PATH=" + runtime["python_library_dir"],
-            ]
+        rt = dict(distribution=runtime["distribution"], python=runtime["python"],
+                  python_library_dir=runtime.get("python_library_dir"))
+        command = runtime_command(rt, script, *prefix, "--request", linux_path(task))
         run_logged(command, folder / "inference.log")
         receipt = load(folder / "output/result.json")
         source = folder / "output/speech.wav"
@@ -72,15 +80,20 @@ def execute(job):
             style=request["style"],
             sample_rate=receipt["sample_rate"],
             runtime_rvc=False,
+            runtime=receipt.get("runtime"),
         )
     elif kind == "conversion":
         runtime = backend["runtime"]
         rt = dict(
-            distribution=runtime["wsl_distribution"], python=runtime["wsl_python"]
+            distribution=runtime["distribution"] if managed else runtime["wsl_distribution"],
+            python=runtime["python"] if managed else runtime["wsl_python"]
         )
+        if managed:
+            rt["python_library_dir"] = runtime.get("python_library_dir")
         command = runtime_command(
             rt,
             script,
+            *prefix,
             "--input",
             linux_path(job["audio_path"]),
             "--output-dir",
@@ -109,7 +122,8 @@ def execute(job):
             or receipt["package"] != backend["package_id"]
         ):
             raise ValueError("RVC package returned an invalid result")
-        metadata = dict(breath_attenuation_applied=applied)
+        metadata = dict(breath_attenuation_applied=applied, runtime=receipt.get("runtime"),
+                        f0_devices=receipt.get("f0_devices"))
     else:
         config = backend["singing"]["config"]
         # Voice routing also applies to score singing, so replacing the configured
@@ -119,9 +133,11 @@ def execute(job):
             backend["package_id"],
         )
         config["rvc_runtime"] = dict(
-            distribution=backend["runtime"]["wsl_distribution"],
-            python=backend["runtime"]["wsl_python"],
+            distribution=backend["runtime"]["distribution"] if managed else backend["runtime"]["wsl_distribution"],
+            python=backend["runtime"]["python"] if managed else backend["runtime"]["wsl_python"],
         )
+        if managed:
+            config["rvc_runtime_profile"] = str(profile_snapshot)
         config_path = folder / "singing_config.json"
         save(config_path, config)
         result = synthesize(

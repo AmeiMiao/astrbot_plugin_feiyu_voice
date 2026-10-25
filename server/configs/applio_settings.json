@@ -1,0 +1,10 @@
+{
+  "model_author": null,
+  "precision": "fp16",
+  "discord_presence": false,
+  "rmvpe_high_register": {
+    "enabled": false,
+    "mode": "true_pitch",
+    "f0_ceil": 1250
+  }
+}

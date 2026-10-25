@@ -1,6 +1,6 @@
-# Feiyu Voice Service v0.1.0
+# Feiyu Voice Service v0.2.0
 
-From this server directory create a Python 3.11+ virtual environment, then install `requirements-service.txt`. Copy `configs/voice_service.example.json` to `configs/voice_service.json` and set package paths. A missing package disables only that capability. Configure each model's `runtime.local.json` as explained in `RUNTIME.md`.
+For AI agent installation, start with [INSTALL_AGENT.md](INSTALL_AGENT.md): select NVIDIA CUDA or AMD WSL ROCm, install independent inference environments, download the models, and select generated `runtime_profile` files. The API uses a separate CPU environment. Choose `configs/voice_service.cuda.example.json` or `configs/voice_service.rocm.example.json`, then save your machine's settings as `configs/voice_service.json`. AMD is experimental without physical GPU validation. Legacy package-local runtime configuration remains supported.
 
 ```bash
 python -m venv .venv
@@ -18,3 +18,5 @@ Speech JSON: `{"voice":"feiyu","text":"你好呀","style":"cute"}`. Conversion J
 Submission returns HTTP202 and a job ID. Poll until `success`, then download WAV. One worker serializes GPU jobs; do not run multiple Uvicorn workers. Existing unfinished jobs become `interrupted` after a restart. Uploads, requests and outputs remain private in `.runtime/`; manage retention locally. Configured package replacement is supported while the queue is idle via `/v1/admin/reload`; a different engine needs its own adapter. Current public RVC engine is `feiyu_rvc_release`.
 
 Ordinary TTS uses its own model directly. Voice conversion uses RVC. Score singing needs the optional SVS setup and then uses the selected RVC. Manual breath processing is never automatic. MIDI/ABC lyrics currently support Mandarin, one character per note, `_` for melisma; expand ABC repeats before importing.
+
+Validation scope and results: [VALIDATION.json](VALIDATION.json). AMD hardware testing remains pending.

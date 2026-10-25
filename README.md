@@ -1,6 +1,16 @@
 # 肥鱼声音 · AstrBot 插件 v0.1.0
 
-通过独立 HTTP 声音服务调用肥鱼说话、RVC换声和可选的MIDI/ABC按谱唱歌。AstrBot内不加载模型或CUDA。
+通过独立 HTTP 声音服务调用肥鱼说话、RVC换声和可选的MIDI/ABC按谱唱歌。AstrBot内不加载模型或GPU运行时。
+
+<!-- runtime-environments -->
+## 让 AI agent 安装声音服务
+
+请将 [server/INSTALL_AGENT.md](server/INSTALL_AGENT.md) 交给安装 agent。先检测显卡，再选择 **CUDA** 或 **WSL2 ROCm**：仓库提供两套依赖预设、独立环境安装器、运行诊断与真实 HTTP 音频验收脚本。模型权重和 RVC 索引共用，AstrBot 插件及调用协议不变。
+
+可直接对 agent 说：**“请按本仓库 server/INSTALL_AGENT.md 安装肥鱼 TTS 和 RVC 声音服务。先检测显卡并选择对应环境，完成真实 API 音频验收，再配置 AstrBot 插件；分别报告已验证与未验证的能力。”** 按谱唱歌需另外提供文档要求的对齐参考。
+
+声音服务 v0.2.0 使用服务端 `runtime_profile` 选择后端，旧配置继续兼容。AMD 配置尚无实体显卡测试，应按文档核对型号/驱动/WSL 支持条件并完成实际音频验收；安装成功不等于所有 A 卡已兼容。插件版本仍为 v0.1.0，已有用户只更新服务端即可采用新环境。
+<!-- /runtime-environments -->
 
 ## 安装与配置
 

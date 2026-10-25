@@ -1,0 +1,65 @@
+{
+  "schema": "feiyu-runtime-backends-validation-v1",
+  "date": "2026-10-25",
+  "service_version": "0.2.0",
+  "plugin_version": "0.1.0",
+  "model_weights_changed": false,
+  "http_protocol_changed": false,
+  "tests": {
+    "legacy_service": 17,
+    "score_frontend": 18,
+    "runtime_and_managed_http": 15,
+    "standalone_contract": 2
+  },
+  "cuda": {
+    "gpu": "NVIDIA GeForce RTX 5090 Laptop GPU",
+    "rvc_clean_install": "passed",
+    "rvc_clean_inference": "passed",
+    "clean_rvc_reference_comparison": {
+      "same_sample_rate": true,
+      "same_shape": true,
+      "sample_arrays_equal": true,
+      "max_abs_difference": 0.0
+    },
+    "cpu_rmvpe_with_gpu_generator": "passed",
+    "http_routes": [
+      {
+        "route": "speech",
+        "style": "cute",
+        "seconds": 6.56,
+        "status": "success"
+      },
+      {
+        "route": "speech",
+        "style": "gentle",
+        "seconds": 10.08,
+        "status": "success"
+      },
+      {
+        "route": "voice-conversion",
+        "style": null,
+        "seconds": 14.98,
+        "status": "success"
+      },
+      {
+        "route": "singing",
+        "style": null,
+        "seconds": 15.0,
+        "status": "success"
+      }
+    ],
+    "tts_svs_environments": "existing compatible environments; dependency dry-run passed"
+  },
+  "rocm": {
+    "status": "experimental",
+    "physical_amd_hardware_tested": false,
+    "wheel_index_checked": "https://download.pytorch.org/whl/rocm7.2/",
+    "cpu_onnx_and_rmvpe_paths": "tested on NVIDIA host; not HIP execution evidence"
+  },
+  "limits": [
+    "No AMD kernel/speed/VRAM/audio certification",
+    "No new subjective audio approval",
+    "No new QQ/WeChat or natural-language tool-selection test"
+  ],
+  "compatibility_source_exact_bytes_preserved": true
+}

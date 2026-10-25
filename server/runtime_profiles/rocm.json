@@ -1,0 +1,13 @@
+{
+  "schema": "feiyu-environment-preset-v1",
+  "backend": "hip",
+  "python": "3.11",
+  "torch_index": "https://download.pytorch.org/whl/rocm7.2",
+  "engines": {
+    "rvc": {"torch": "2.11.0+rocm7.2", "torchaudio": "2.11.0+rocm7.2", "precision": "float32", "f0_device": "cpu", "torchcodec": "0.11.0+cpu"},
+    "tts": {"torch": "2.11.0+rocm7.2", "torchaudio": "2.11.0+rocm7.2", "precision": "float32", "torchcodec": "0.11.0+cpu"},
+    "svs": {"torch": "2.11.0+rocm7.2", "torchaudio": "2.11.0+rocm7.2", "precision": "float32", "torchcodec": "0.11.0+cpu"}
+  },
+  "hardware_validation": "experimental; no physical AMD GPU tested",
+  "compatibility_matrix": "https://rocm.docs.amd.com/en/latest/compatibility/compatibility-matrix.html"
+}

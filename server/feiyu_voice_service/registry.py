@@ -4,6 +4,23 @@ import copy
 from pathlib import Path
 
 from feiyu_singing.pipeline import load, resolve, sha
+from feiyu_runtime.common import validate_profile
+
+
+def runtime_entry(profile_path, engine):
+    path = resolve(profile_path)
+    profile = validate_profile(load(path))
+    if profile["engine"] != engine:
+        raise ValueError("Runtime profile engine does not match package")
+    return dict(runtime=profile, runtime_path=str(path), runtime_sha256=sha(path),
+                runtime_backend=profile["backend"], runtime_verification="configured; inference not yet checked",
+                adapter="managed", adapter_sha256=adapter_digest())
+
+
+def adapter_digest():
+    import hashlib
+    paths = sorted((resolve("feiyu_runtime")).glob("*.py"))
+    return hashlib.sha256("\n".join(p.name + ":" + sha(p) for p in paths).encode()).hexdigest()
 
 
 class Registry:
@@ -50,7 +67,7 @@ class Registry:
                             else "run_cover.py"
                         )
                         version, identity = manifest["version"], manifest["id"]
-                    runtime = package / "runtime.local.json"
+                    runtime = resolve(item["runtime_profile"]) if item.get("runtime_profile") else package / "runtime.local.json"
                     if (
                         not script.is_file()
                         or not runtime.is_file()
@@ -69,8 +86,14 @@ class Registry:
                         runtime=load(runtime),
                         runtime_sha256=sha(runtime),
                         script_sha256=sha(script),
+                        runtime_path=str(runtime),
                     )
+                    if item.get("runtime_profile"):
+                        if kind == "rvc" and manifest["schema"] != "feiyu-rvc-release-v1":
+                            raise ValueError("Managed RVC requires the public FeiyuVoice-RVC v1 package")
+                        entry.update(runtime_entry(item["runtime_profile"], kind))
                 except (OSError, ValueError, KeyError) as exc:
+                    entry["available"] = False
                     entry["reason"] = type(exc).__name__ + ": " + str(exc)
                 entries[kind][voice] = entry
         singing = dict(available=False, reason="Score synthesis is not configured")
@@ -78,6 +101,10 @@ class Registry:
             try:
                 path = resolve(config["singing"]["config"])
                 settings = load(path)
+                if settings.get("svs_runtime_profile"):
+                    svs = runtime_entry(settings["svs_runtime_profile"], "svs")
+                    settings["svs_runtime"] = svs["runtime"]
+                    settings["svs_runtime_profile_sha256"] = svs["runtime_sha256"]
                 voice = config["singing"]["rvc_voice"]
                 selected = entries["rvc"].get(voice, {})
                 if not selected.get("available"):
@@ -109,6 +136,8 @@ class Registry:
                         "version",
                         "package_id",
                         "styles",
+                        "runtime_backend",
+                        "runtime_verification",
                     )
                     if k in e
                 }
@@ -117,7 +146,7 @@ class Registry:
             rvc=[
                 {
                     k: e[k]
-                    for k in ("voice", "engine", "available", "version", "package_id")
+                    for k in ("voice", "engine", "available", "version", "package_id", "runtime_backend", "runtime_verification")
                     if k in e
                 }
                 for e in self.entries["rvc"].values()
