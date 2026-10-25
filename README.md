@@ -20,7 +20,7 @@
 
 | 声库 | 下载 |
 |---|---|
-| 肥鱼TTS | [Hugging Face](https://huggingface.co/Esmerubphire/FeiyuVoice-CosyVoice3) |
+| 肥鱼TTS | [Hugging Face](https://huggingface.co/Esmerubphire/FeiyuVoice-CosyVoice3) · [ModelScope](https://modelscope.cn/models/Esmerubphire/FeiyuVoice-CosyVoice3) |
 | 肥鱼RVC v1 | [Hugging Face](https://huggingface.co/Esmerubphire/FeiyuVoice-RVC) · [ModelScope](https://modelscope.cn/models/Esmerubphire/FeiyuVoice-RVC) |
 
 服务版本、插件版本和模型版本独立管理。兼容包体可在服务端配置切换，插件API不变。RVC转换干净人声，不自动分离伴奏；可选换气衰减需要本曲人工区间。
