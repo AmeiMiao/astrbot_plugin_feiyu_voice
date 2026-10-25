@@ -1,0 +1,11 @@
+{
+  "status": "passed_local_validation",
+  "service_cpu_regression_tests": 17,
+  "score_frontend_regression_tests": 18,
+  "clean_source_contract_tests": 2,
+  "actual_rvc_v1_api": true,
+  "original_plugin_webchat_tts_rvc_singing": true,
+  "model_weights_unchanged": true,
+  "no_training_data_or_credentials_distributed": true,
+  "scope": "Local Windows+WSL and AstrBot4.29.3; arbitrary GPU/platform portability is not certified"
+}

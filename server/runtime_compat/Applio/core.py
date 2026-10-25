@@ -1,0 +1,1219 @@
+import json
+import os
+import subprocess
+import sys
+
+if sys.platform == "darwin":
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+elif sys.platform == "win32":
+    # Ensure virtualenv Scripts and torch DLL directories are accessible
+    # for dynamic loading of ROCm and runtime libraries
+    scripts_dir = os.path.dirname(sys.executable)
+    if os.path.isdir(scripts_dir):
+        if hasattr(os, "add_dll_directory"):
+            try:
+                os.add_dll_directory(scripts_dir)
+            except Exception:
+                pass
+        curr_path = os.environ.get("PATH", "")
+        if scripts_dir.lower() not in curr_path.lower():
+            os.environ["PATH"] = f"{scripts_dir};{curr_path}"
+
+    venv_base = os.path.dirname(scripts_dir)
+    torch_lib = os.path.join(venv_base, "Lib", "site-packages", "torch", "lib")
+    if os.path.isdir(torch_lib):
+        if hasattr(os, "add_dll_directory"):
+            try:
+                os.add_dll_directory(torch_lib)
+            except Exception:
+                pass
+        curr_path = os.environ.get("PATH", "")
+        if torch_lib.lower() not in curr_path.lower():
+            os.environ["PATH"] = f"{torch_lib};{curr_path}"
+
+    os.environ.setdefault("MIOPEN_FIND_MODE", "2")
+    os.environ.setdefault("MIOPEN_DEBUG_DISABLE_FIND_DB", "1")
+    os.environ.setdefault("MIOPEN_LOG_LEVEL", "0")
+    os.environ.setdefault("MIOPEN_ENABLE_LOGGING", "0")
+    os.environ.setdefault("DISABLE_ADDMM_CUDA_LT", "1")
+    os.environ.setdefault("AMD_COMGR_CACHE", "0")
+    os.environ.setdefault("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "0")
+from functools import lru_cache
+from datetime import datetime, timedelta
+
+now_dir = os.getcwd()
+if now_dir not in sys.path:
+    sys.path.append(now_dir)
+
+current_script_directory = os.path.dirname(os.path.realpath(__file__))
+if current_script_directory not in sys.path:
+    sys.path.append(current_script_directory)
+
+from rvc.lib.user_config import get_logs_dir
+
+logs_path = get_logs_dir()
+python = sys.executable
+
+
+def run_quiet(command, **kwargs):
+    if os.name == "nt":
+        kwargs.setdefault("creationflags", getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return subprocess.run(command, **kwargs)
+
+
+@lru_cache(maxsize=1)
+def load_voices_data():
+    tts_path = os.path.join(
+        current_script_directory, "rvc", "lib", "tools", "tts_voices.json"
+    )
+    if os.path.exists(tts_path):
+        try:
+            with open(tts_path, "r", encoding="utf-8") as file:
+                return json.load(file)
+        except Exception:
+            pass
+    return []
+
+
+voices_data = load_voices_data()
+locales = list({voice["ShortName"] for voice in voices_data}) or ["en-US-AnaNeural"]
+
+
+@lru_cache(maxsize=None)
+def import_voice_converter():
+    try:
+        from rvc.infer.infer import VoiceConverter
+
+        return VoiceConverter()
+    except ImportError as e:
+        raise RuntimeError(
+            f"Missing dependency: {e}. Please install requirements via 'pip install -r requirements.txt'"
+        )
+
+
+@lru_cache(maxsize=1)
+def get_config():
+    from rvc.configs.config import Config
+
+    return Config()
+
+
+def pretrained_selector(vocoder: str, sample_rate: int):
+    from rvc.lib.tools.prerequisites_download import ensure_pretrained
+
+    return ensure_pretrained(vocoder, sample_rate)
+
+
+def _base_infer_kwargs(
+    pitch=0,
+    index_rate=0.3,
+    volume_envelope=1.0,
+    protect=0.33,
+    f0_method="rmvpe",
+    pth_path="",
+    index_path="",
+    split_audio=False,
+    f0_autotune=False,
+    f0_autotune_strength=1.0,
+    proposed_pitch=False,
+    proposed_pitch_threshold=155.0,
+    export_format="WAV",
+    embedder_model="contentvec",
+    embedder_model_custom=None,
+    formant_shifting=False,
+    formant_qfrency=1.0,
+    formant_timbre=1.0,
+    sid=0,
+    inference_engine=None,
+    onnx_precision="auto",
+):
+    return {
+        "model_path": pth_path,
+        "index_path": index_path,
+        "volume_envelope": volume_envelope,
+        "pitch": pitch,
+        "index_rate": index_rate,
+        "protect": protect,
+        "f0_method": f0_method,
+        "split_audio": split_audio,
+        "f0_autotune": f0_autotune,
+        "f0_autotune_strength": f0_autotune_strength,
+        "proposed_pitch": proposed_pitch,
+        "proposed_pitch_threshold": proposed_pitch_threshold,
+        "export_format": export_format,
+        "embedder_model": embedder_model,
+        "embedder_model_custom": embedder_model_custom,
+        "formant_shifting": formant_shifting,
+        "formant_qfrency": formant_qfrency,
+        "formant_timbre": formant_timbre,
+        "sid": sid,
+        "inference_engine": inference_engine,
+        "onnx_precision": onnx_precision,
+    }
+
+
+def run_infer_script(
+    pitch: int,
+    index_rate: float,
+    volume_envelope: float,
+    protect: float,
+    f0_method: str,
+    input_path: str,
+    output_path: str,
+    pth_path: str,
+    index_path: str,
+    split_audio: bool,
+    f0_autotune: bool,
+    f0_autotune_strength: float,
+    proposed_pitch: bool,
+    proposed_pitch_threshold: float,
+    export_format: str,
+    embedder_model: str,
+    embedder_model_custom: str = None,
+    formant_shifting: bool = False,
+    formant_qfrency: float = 1.0,
+    formant_timbre: float = 1.0,
+    sid: int = 0,
+    inference_engine: str = None,
+    onnx_precision: str = "auto",
+):
+    kwargs = _base_infer_kwargs(
+        pitch=pitch,
+        index_rate=index_rate,
+        volume_envelope=volume_envelope,
+        protect=protect,
+        f0_method=f0_method,
+        pth_path=pth_path,
+        index_path=index_path,
+        split_audio=split_audio,
+        f0_autotune=f0_autotune,
+        f0_autotune_strength=f0_autotune_strength,
+        proposed_pitch=proposed_pitch,
+        proposed_pitch_threshold=proposed_pitch_threshold,
+        export_format=export_format,
+        embedder_model=embedder_model,
+        embedder_model_custom=embedder_model_custom,
+        formant_shifting=formant_shifting,
+        formant_qfrency=formant_qfrency,
+        formant_timbre=formant_timbre,
+        sid=sid,
+        inference_engine=inference_engine,
+        onnx_precision=onnx_precision,
+    )
+    kwargs["audio_input_path"] = input_path
+    kwargs["audio_output_path"] = output_path
+    infer_pipeline = import_voice_converter()
+    infer_pipeline.convert_audio(**kwargs)
+    return f"File {input_path} inferred successfully.", output_path.replace(
+        ".wav", f".{export_format.lower()}"
+    )
+
+
+def run_batch_infer_script(
+    pitch: int,
+    index_rate: float,
+    volume_envelope: float,
+    protect: float,
+    f0_method: str,
+    input_folder: str,
+    output_folder: str,
+    pth_path: str,
+    index_path: str,
+    split_audio: bool,
+    f0_autotune: bool,
+    f0_autotune_strength: float,
+    proposed_pitch: bool,
+    proposed_pitch_threshold: float,
+    export_format: str,
+    embedder_model: str,
+    embedder_model_custom: str = None,
+    formant_shifting: bool = False,
+    formant_qfrency: float = 1.0,
+    formant_timbre: float = 1.0,
+    sid: int = 0,
+    inference_engine: str = None,
+    onnx_precision: str = "auto",
+):
+    kwargs = _base_infer_kwargs(
+        pitch=pitch,
+        index_rate=index_rate,
+        volume_envelope=volume_envelope,
+        protect=protect,
+        f0_method=f0_method,
+        pth_path=pth_path,
+        index_path=index_path,
+        split_audio=split_audio,
+        f0_autotune=f0_autotune,
+        f0_autotune_strength=f0_autotune_strength,
+        proposed_pitch=proposed_pitch,
+        proposed_pitch_threshold=proposed_pitch_threshold,
+        export_format=export_format,
+        embedder_model=embedder_model,
+        embedder_model_custom=embedder_model_custom,
+        formant_shifting=formant_shifting,
+        formant_qfrency=formant_qfrency,
+        formant_timbre=formant_timbre,
+        sid=sid,
+        inference_engine=inference_engine,
+        onnx_precision=onnx_precision,
+    )
+    kwargs["audio_input_paths"] = input_folder
+    kwargs["audio_output_path"] = output_folder
+    infer_pipeline = import_voice_converter()
+    infer_pipeline.convert_audio_batch(**kwargs)
+    return f"Files from {input_folder} inferred successfully."
+
+
+def run_tts_script(
+    tts_file: str,
+    tts_text: str,
+    tts_voice: str,
+    tts_rate: int,
+    pitch: int,
+    index_rate: float,
+    volume_envelope: float,
+    protect: float,
+    f0_method: str,
+    output_tts_path: str,
+    output_rvc_path: str,
+    pth_path: str,
+    index_path: str,
+    split_audio: bool,
+    f0_autotune: bool,
+    f0_autotune_strength: float,
+    proposed_pitch: bool,
+    proposed_pitch_threshold: float,
+    export_format: str,
+    embedder_model: str,
+    embedder_model_custom: str = None,
+    sid: int = 0,
+    formant_shifting: bool = False,
+    formant_qfrency: float = 1.0,
+    formant_timbre: float = 1.0,
+):
+    tts_script_path = os.path.join(
+        current_script_directory, "rvc", "lib", "tools", "tts.py"
+    )
+
+    if os.path.exists(output_tts_path) and os.path.abspath(output_tts_path).startswith(
+        os.path.abspath(os.path.join(current_script_directory, "assets"))
+    ):
+        try:
+            os.remove(output_tts_path)
+        except Exception:
+            pass
+
+    cmd = [
+        python,
+        tts_script_path,
+        "--tts-text",
+        tts_text or "",
+        "--tts-voice",
+        tts_voice or "en-US-AnaNeural",
+        "--tts-rate",
+        str(tts_rate),
+        "--output-tts-path",
+        output_tts_path,
+    ]
+    if tts_file and os.path.exists(tts_file):
+        cmd.extend(["--tts-file", tts_file])
+
+    result = run_quiet(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        err_msg = result.stderr.strip()
+        if "No module named" in err_msg:
+            pkg = err_msg.split("No module named")[-1].strip().strip("'\"")
+            raise RuntimeError(
+                f"Missing Python package '{pkg}'. Please run: pip install -r requirements.txt"
+            )
+        raise RuntimeError(err_msg or f"TTS failed with code {result.returncode}")
+
+    if output_rvc_path and pth_path and os.path.exists(pth_path):
+        infer_pipeline = import_voice_converter()
+        infer_pipeline.convert_audio(
+            pitch=pitch,
+            index_rate=index_rate,
+            volume_envelope=volume_envelope,
+            protect=protect,
+            f0_method=f0_method,
+            audio_input_path=output_tts_path,
+            audio_output_path=output_rvc_path,
+            model_path=pth_path,
+            index_path=index_path,
+            split_audio=split_audio,
+            f0_autotune=f0_autotune,
+            f0_autotune_strength=f0_autotune_strength,
+            proposed_pitch=proposed_pitch,
+            proposed_pitch_threshold=proposed_pitch_threshold,
+            formant_shifting=formant_shifting,
+            formant_qfrency=formant_qfrency,
+            formant_timbre=formant_timbre,
+            export_format=export_format,
+            embedder_model=embedder_model,
+            embedder_model_custom=embedder_model_custom,
+            sid=sid,
+        )
+        return f"Text synthesized and converted successfully.", output_rvc_path.replace(
+            ".wav", f".{export_format.lower()}"
+        )
+
+    return f"Text synthesized successfully.", output_tts_path
+
+
+def run_preprocess_script(
+    model_name: str,
+    dataset_path: str,
+    sample_rate: int,
+    cpu_cores: int,
+    cut_preprocess: str,
+    process_effects: bool,
+    chunk_len: float,
+    overlap_len: float,
+    normalization_mode: str = "none",
+):
+    preprocess_script_path = os.path.join(
+        current_script_directory, "rvc", "train", "preprocess", "preprocess.py"
+    )
+    command = [
+        python,
+        preprocess_script_path,
+        *map(
+            str,
+            [
+                os.path.join(logs_path, model_name),
+                dataset_path,
+                sample_rate,
+                cpu_cores,
+                cut_preprocess,
+                process_effects,
+                chunk_len,
+                overlap_len,
+                normalization_mode,
+            ],
+        ),
+    ]
+    result = run_quiet(command)
+    if result.returncode != 0:
+        return f"Preprocessing failed for model {model_name}. Please check the console logs for more details."
+    return f"Model {model_name} preprocessed successfully."
+
+
+def run_extract_script(
+    model_name: str,
+    f0_method: str,
+    cpu_cores: int,
+    gpu: int,
+    sample_rate: int,
+    embedder_model: str,
+    embedder_model_custom: str = None,
+    include_mutes: int = 2,
+):
+    model_path = os.path.join(logs_path, model_name)
+    extract = os.path.join(
+        current_script_directory, "rvc", "train", "extract", "extract.py"
+    )
+
+    command_1 = [
+        python,
+        extract,
+        *map(
+            str,
+            [
+                model_path,
+                f0_method,
+                cpu_cores,
+                gpu,
+                sample_rate,
+                embedder_model,
+                embedder_model_custom,
+                include_mutes,
+            ],
+        ),
+    ]
+
+    result = run_quiet(command_1)
+    if result.returncode != 0:
+        return f"Feature extraction failed for model {model_name}. Please check the console logs for more details."
+    return f"Model {model_name} extracted successfully."
+
+
+def shutdown_after_training():
+    os_name = sys.platform
+    shutdown_time = None
+    if os_name == "win32":
+        delay_seconds = 300
+        shutdown_time = datetime.now() + timedelta(seconds=delay_seconds)
+        run_quiet(["shutdown", "/s", "/t", str(delay_seconds)])
+    elif os_name == "darwin":
+        shutdown_time = datetime.now()
+        os.system("osascript -e 'tell app \"System Events\" to shut down'")
+    elif os_name.startswith("linux"):
+        delay_minutes = 5
+        shutdown_time = datetime.now() + timedelta(minutes=delay_minutes)
+        os.system(f"shutdown -h +{delay_minutes}")
+    else:
+        print("Unsupported OS")
+        return os_name, None
+    return os_name, shutdown_time
+
+
+def append_data_shutdown_log(
+    model_name, total_epoch, batch_size, sample_rate, gpu, shutdown_time, os_name
+):
+    log_file = "training_shutdown_log.txt"
+    log_entry = (
+        f"[{datetime.now()}] "
+        f"Model: {model_name} | "
+        f"Epochs: {total_epoch} | "
+        f"Batch: {batch_size} | "
+        f"SR: {sample_rate} | "
+        f"GPU: {gpu} | "
+        f"OS: {os_name} | "
+        f"Shutdown at: {shutdown_time}\n"
+    )
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(log_entry)
+
+
+def run_train_script(
+    model_name: str,
+    save_every_epoch: int,
+    save_only_latest: bool,
+    save_every_weights: bool,
+    total_epoch: int,
+    sample_rate: int,
+    batch_size: int,
+    gpu: int,
+    pretrained: bool,
+    cleanup: bool,
+    index_algorithm: str = "Auto",
+    cache_data_in_gpu: bool = False,
+    custom_pretrained: bool = False,
+    g_pretrained_path: str = None,
+    d_pretrained_path: str = None,
+    vocoder: str = "HiFi-GAN",
+    checkpointing: bool = False,
+    shutdown_check: bool = False,
+):
+    if pretrained:
+        if not custom_pretrained:
+            pg, pd = pretrained_selector(str(vocoder), int(sample_rate))
+        else:
+            if g_pretrained_path is None or d_pretrained_path is None:
+                raise ValueError(
+                    "Please provide the path to the pretrained G and D models."
+                )
+            pg, pd = g_pretrained_path, d_pretrained_path
+            if not all(
+                path and os.path.isfile(path) and os.path.getsize(path) > 0
+                for path in (pg, pd)
+            ):
+                raise ValueError(
+                    "Custom pretrained G and D files must exist and be non-empty."
+                )
+    else:
+        pg, pd = "", ""
+
+    train_script_path = os.path.join(
+        current_script_directory, "rvc", "train", "train.py"
+    )
+    command = [
+        python,
+        train_script_path,
+        *map(
+            str,
+            [
+                model_name,
+                save_every_epoch,
+                total_epoch,
+                pg,
+                pd,
+                gpu,
+                batch_size,
+                sample_rate,
+                save_only_latest,
+                save_every_weights,
+                cache_data_in_gpu,
+                cleanup,
+                vocoder,
+                checkpointing,
+            ],
+        ),
+    ]
+    result = run_quiet(command)
+    if result.returncode != 0:
+        return f"Training failed for model {model_name}. Please check the console logs for more details."
+
+    run_index_script(model_name, index_algorithm)
+
+    if shutdown_check:
+        os_name, shutdown_datetime = shutdown_after_training()
+        append_data_shutdown_log(
+            model_name=model_name,
+            total_epoch=total_epoch,
+            batch_size=batch_size,
+            sample_rate=sample_rate,
+            gpu=gpu,
+            shutdown_time=shutdown_datetime,
+            os_name=os_name,
+        )
+        print(
+            f"Model {model_name} trained successfully. Shutdown scheduled at {shutdown_datetime}"
+        )
+        return f"Model {model_name} trained successfully. Shutdown scheduled at {shutdown_datetime}"
+
+    return f"Model {model_name} trained successfully."
+
+
+def run_index_script(model_name: str, index_algorithm: str):
+    index_script_path = os.path.join(
+        current_script_directory, "rvc", "train", "process", "extract_index.py"
+    )
+    command = [
+        python,
+        index_script_path,
+        os.path.join(logs_path, model_name),
+        index_algorithm,
+    ]
+    result = run_quiet(command)
+    if result.returncode != 0:
+        return f"Index generation failed for model {model_name}. Make sure you have enough GPU available to generate the Index file."
+    return f"Index file for model {model_name} generated successfully."
+
+
+def run_model_information_script(pth_path: str):
+    if not os.path.exists(pth_path):
+        raise FileNotFoundError(f"Model file not found: '{pth_path}'")
+    try:
+        from rvc.train.process.model_information import model_information as model_info
+
+        info = model_info(pth_path)
+        print(info)
+        return info
+    except ImportError as e:
+        raise RuntimeError(
+            f"Missing dependency: {e}. Please install requirements: pip install -r requirements.txt"
+        )
+
+
+def run_model_blender_script(
+    model_name: str, pth_path_1: str, pth_path_2: str, ratio: float
+):
+    from rvc.train.process.model_blender import model_blender as blender
+
+    message, model_blended = blender(model_name, pth_path_1, pth_path_2, ratio)
+    return message, model_blended
+
+
+def run_tensorboard_script():
+    from rvc.lib.tools.launch_tensorboard import launch_tensorboard_pipeline
+
+    launch_tensorboard_pipeline()
+
+
+def run_download_script(model_link: str):
+    try:
+        from rvc.lib.tools.model_download import model_download_pipeline
+
+        result = model_download_pipeline(model_link)
+        if result == "Error" or result is None:
+            return "An error occurred downloading the model. Please check the console logs for more details."
+        return "Model downloaded successfully."
+    except ImportError as e:
+        raise RuntimeError(
+            f"Missing dependency: {e}. Please install requirements: pip install -r requirements.txt"
+        )
+
+
+def run_prerequisites_script(
+    pretraineds_hifigan: bool = True, models: bool = True, exe: bool = True
+):
+    try:
+        from rvc.lib.tools.prerequisites_download import prequisites_download_pipeline
+
+        prequisites_download_pipeline(pretraineds_hifigan, models, exe)
+        return "Prerequisites downloaded and installed successfully."
+    except ImportError as e:
+        raise RuntimeError(
+            f"Missing dependency: {e}. Please install requirements: pip install -r requirements.txt"
+        )
+
+
+def run_audio_analyzer_script(
+    input_path: str, save_plot_path: str = os.path.join(logs_path, "audio_analysis.png")
+):
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"Audio file not found: '{input_path}'")
+    try:
+        from rvc.lib.tools.analyzer import analyze_audio
+
+        audio_info, plot_path = analyze_audio(input_path, save_plot_path)
+        print(
+            f"Audio info of {input_path}: {audio_info}\n"
+            f"Audio file analyzed successfully. Plot saved at: {plot_path}"
+        )
+        return audio_info, plot_path
+    except ImportError as e:
+        raise RuntimeError(
+            f"Missing dependency: {e}. Please install requirements: pip install -r requirements.txt"
+        )
+
+
+import click
+
+
+def _get_version():
+    config_path = os.path.join(
+        current_script_directory, "assets", "config_template.json"
+    )
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            return json.load(f).get("version", "unknown")
+    except (FileNotFoundError, json.JSONDecodeError):
+        return "unknown"
+
+
+VERSION = _get_version()
+
+
+def _infer_opts(func):
+    """Core inference options shared by infer, batch_infer and tts."""
+    opts = [
+        click.option(
+            "--pitch",
+            type=click.IntRange(-24, 24),
+            default=0,
+            help="Set the pitch of the audio. Higher values result in a higher pitch.",
+        ),
+        click.option(
+            "--index-rate",
+            type=click.FloatRange(0, 1),
+            default=0.3,
+            help="Control the influence of the index file on the output.",
+        ),
+        click.option(
+            "--volume-envelope",
+            type=click.FloatRange(0, 1),
+            default=1.0,
+            help="Control the blending of the output's volume envelope.",
+        ),
+        click.option(
+            "--protect",
+            type=click.FloatRange(0, 0.5),
+            default=0.33,
+            help="Protect consonants and breathing sounds from artifacts.",
+        ),
+        click.option(
+            "--f0-method",
+            type=click.Choice(
+                [
+                    "crepe",
+                    "rmvpe",
+                    "fcpe",
+                    "hybrid[crepe+rmvpe]",
+                    "hybrid[crepe+fcpe]",
+                    "hybrid[rmvpe+fcpe]",
+                    "hybrid[crepe+rmvpe+fcpe]",
+                ]
+            ),
+            default="rmvpe",
+            help="Choose the pitch extraction algorithm.",
+        ),
+        click.option(
+            "--split-audio",
+            is_flag=True,
+            default=False,
+            help="Split audio into smaller segments before inference.",
+        ),
+        click.option(
+            "--f0-autotune",
+            is_flag=True,
+            default=False,
+            help="Apply a light autotune to the inferred audio.",
+        ),
+        click.option(
+            "--f0-autotune-strength",
+            type=click.FloatRange(0, 1),
+            default=1.0,
+            help="Autotune strength (higher = more chromatic snap).",
+        ),
+        click.option(
+            "--proposed-pitch",
+            is_flag=True,
+            default=False,
+            help="Enable proposed pitch adjustment.",
+        ),
+        click.option(
+            "--proposed-pitch-threshold",
+            type=click.FloatRange(50, 1199),
+            default=155.0,
+            help="Proposed pitch threshold value.",
+        ),
+        click.option(
+            "--export-format",
+            type=click.Choice(["WAV", "MP3", "FLAC", "OGG", "M4A"]),
+            default="WAV",
+            help="Output audio format.",
+        ),
+        click.option(
+            "--embedder-model",
+            type=click.Choice(
+                [
+                    "contentvec",
+                    "spin",
+                    "spin-v2",
+                    "chinese-hubert-base",
+                    "japanese-hubert-base",
+                    "korean-hubert-base",
+                    "custom",
+                ]
+            ),
+            default="contentvec",
+            help="Model used for generating speaker embeddings.",
+        ),
+        click.option(
+            "--embedder-model-custom",
+            type=str,
+            default=None,
+            help="Path to a custom embedding model (only when --embedder-model is 'custom').",
+        ),
+        click.option(
+            "--sid", type=int, default=0, help="Speaker ID for multi-speaker models."
+        ),
+    ]
+    for opt in reversed(opts):
+        func = opt(func)
+    return func
+
+
+def _formant_opts(func):
+    """Formant options shared by infer and batch_infer."""
+    opts = [
+        click.option(
+            "--formant-shifting",
+            is_flag=True,
+            default=False,
+            help="Apply formant shifting to the input audio.",
+        ),
+        click.option(
+            "--formant-qfrency",
+            type=float,
+            default=1.0,
+            help="Formant shift frequency.",
+        ),
+        click.option(
+            "--formant-timbre", type=float, default=1.0, help="Formant shift timbre."
+        ),
+    ]
+    for opt in reversed(opts):
+        func = opt(func)
+    return func
+
+
+@click.group(invoke_without_command=True)
+@click.version_option(
+    version=VERSION, prog_name="Applio", message="%(prog)s v%(version)s"
+)
+@click.pass_context
+def cli(ctx):
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+        ctx.exit()
+
+
+@cli.command()
+@click.option("--input-path", required=True, help="Full path to the input audio file.")
+@click.option(
+    "--output-path", required=True, help="Full path to the output audio file."
+)
+@click.option(
+    "--pth-path", required=True, help="Full path to the RVC model file (.pth)."
+)
+@click.option(
+    "--index-path", required=True, help="Full path to the index file (.index)."
+)
+@_infer_opts
+@_formant_opts
+def infer(**kwargs):
+    """Run voice conversion on a single audio file."""
+    result = run_infer_script(**kwargs)
+    click.echo(result[0])
+
+
+@cli.command()
+@click.option(
+    "--input-folder", required=True, help="Folder containing input audio files."
+)
+@click.option(
+    "--output-folder", required=True, help="Folder for saving output audio files."
+)
+@click.option(
+    "--pth-path", required=True, help="Full path to the RVC model file (.pth)."
+)
+@click.option(
+    "--index-path", required=True, help="Full path to the index file (.index)."
+)
+@_infer_opts
+@_formant_opts
+def batch_infer(**kwargs):
+    """Run voice conversion on multiple audio files in a folder."""
+    result = run_batch_infer_script(**kwargs)
+    click.echo(result)
+
+
+@cli.command()
+@click.option("--tts-file", required=True, help="File with text to be synthesized.")
+@click.option("--tts-text", required=True, help="Text to be synthesized.")
+@click.option(
+    "--tts-voice",
+    required=True,
+    type=click.Choice(locales, case_sensitive=False),
+    help="Voice to use for TTS synthesis.",
+)
+@click.option(
+    "--tts-rate",
+    type=click.IntRange(-100, 100),
+    default=0,
+    help="Speaking rate (-100 slower .. 100 faster).",
+)
+@click.option(
+    "--output-tts-path", required=True, help="Path to save the synthesized TTS audio."
+)
+@click.option(
+    "--output-rvc-path", required=True, help="Path to save the voice-converted audio."
+)
+@click.option(
+    "--pth-path", required=True, help="Full path to the RVC model file (.pth)."
+)
+@click.option(
+    "--index-path", required=True, help="Full path to the index file (.index)."
+)
+@_infer_opts
+def tts(**kwargs):
+    """Synthesise speech with TTS and apply voice conversion."""
+    result = run_tts_script(**kwargs)
+    click.echo(result[0])
+
+
+@cli.command()
+@click.option("--model-name", required=True, help="Name of the model to train.")
+@click.option("--dataset-path", required=True, help="Path to the dataset directory.")
+@click.option(
+    "--sample-rate",
+    required=True,
+    type=click.Choice(["32000", "40000", "48000"]),
+    help="Target sampling rate.",
+)
+@click.option(
+    "--cpu-cores",
+    type=click.IntRange(1, 64),
+    default=None,
+    help="Number of CPU cores to use.",
+)
+@click.option(
+    "--cut-preprocess",
+    type=click.Choice(["Skip", "Simple", "Automatic"]),
+    default="Automatic",
+    help="Dataset cutting method.",
+)
+@click.option(
+    "--process-effects",
+    is_flag=True,
+    default=False,
+    help="Disable filters during preprocessing.",
+)
+@click.option(
+    "--chunk-len",
+    type=click.Choice([str(i * 0.5) for i in range(1, 11)]),
+    default="3.0",
+    help="Chunk length in seconds.",
+)
+@click.option(
+    "--overlap-len",
+    type=click.Choice(["0.0", "0.1", "0.2", "0.3", "0.4"]),
+    default="0.3",
+    help="Overlap length.",
+)
+@click.option(
+    "--normalization-mode",
+    type=click.Choice(["none", "pre", "post"]),
+    default="none",
+    help="Normalization mode.",
+)
+def preprocess(**kwargs):
+    """Preprocess a dataset for training."""
+    kwargs["sample_rate"] = int(kwargs["sample_rate"])
+    kwargs["chunk_len"] = float(kwargs["chunk_len"])
+    kwargs["overlap_len"] = float(kwargs["overlap_len"])
+    kwargs["cpu_cores"] = kwargs.get("cpu_cores") or 1
+    result = run_preprocess_script(
+        model_name=kwargs["model_name"],
+        dataset_path=kwargs["dataset_path"],
+        sample_rate=kwargs["sample_rate"],
+        cpu_cores=kwargs["cpu_cores"],
+        cut_preprocess=kwargs["cut_preprocess"],
+        process_effects=kwargs["process_effects"],
+        chunk_len=kwargs["chunk_len"],
+        overlap_len=kwargs["overlap_len"],
+        normalization_mode=kwargs["normalization_mode"],
+    )
+    click.echo(result)
+
+
+@cli.command()
+@click.option("--model-name", required=True, help="Name of the model.")
+@click.option(
+    "--f0-method",
+    type=click.Choice(["crepe", "rmvpe", "fcpe"]),
+    default="rmvpe",
+    help="Pitch extraction method.",
+)
+@click.option(
+    "--cpu-cores", type=click.IntRange(1, 64), default=None, help="Number of CPU cores."
+)
+@click.option("--gpu", type=str, default="-", help="GPU device to use (e.g. '0').")
+@click.option(
+    "--sample-rate",
+    required=True,
+    type=click.Choice(["32000", "40000", "44100", "48000"]),
+    help="Target sampling rate.",
+)
+@click.option(
+    "--embedder-model",
+    type=click.Choice(
+        [
+            "contentvec",
+            "spin",
+            "spin-v2",
+            "chinese-hubert-base",
+            "japanese-hubert-base",
+            "korean-hubert-base",
+            "custom",
+        ]
+    ),
+    default="contentvec",
+    help="Model used for generating speaker embeddings.",
+)
+@click.option(
+    "--embedder-model-custom",
+    type=str,
+    default=None,
+    help="Path to custom embedding model.",
+)
+@click.option(
+    "--include-mutes",
+    type=click.IntRange(0, 10),
+    default=2,
+    help="Number of silent files to include.",
+)
+def extract(**kwargs):
+    """Extract features from a preprocessed dataset."""
+    kwargs["sample_rate"] = int(kwargs["sample_rate"])
+    kwargs["cpu_cores"] = kwargs.get("cpu_cores") or 1
+    result = run_extract_script(
+        model_name=kwargs["model_name"],
+        f0_method=kwargs["f0_method"],
+        cpu_cores=kwargs["cpu_cores"],
+        gpu=kwargs["gpu"],
+        sample_rate=kwargs["sample_rate"],
+        embedder_model=kwargs["embedder_model"],
+        embedder_model_custom=kwargs["embedder_model_custom"],
+        include_mutes=kwargs["include_mutes"],
+    )
+    click.echo(result)
+
+
+@cli.command()
+@click.option("--model-name", required=True, help="Name of the model to train.")
+@click.option(
+    "--vocoder",
+    type=click.Choice(["HiFi-GAN", "MRF HiFi-GAN", "RefineGAN"]),
+    default="HiFi-GAN",
+    help="Vocoder to use.",
+)
+@click.option(
+    "--checkpointing",
+    is_flag=True,
+    default=False,
+    help="Enable memory-efficient checkpointing.",
+)
+@click.option(
+    "--save-every-epoch",
+    required=True,
+    type=click.IntRange(1, 100),
+    help="Save checkpoint every N epochs.",
+)
+@click.option(
+    "--save-only-latest",
+    is_flag=True,
+    default=False,
+    help="Keep only the latest checkpoint.",
+)
+@click.option(
+    "--save-every-weights",
+    is_flag=True,
+    default=True,
+    help="Save model weights every epoch.",
+)
+@click.option(
+    "--total-epoch",
+    type=click.IntRange(1, 10000),
+    default=1000,
+    help="Total number of training epochs.",
+)
+@click.option(
+    "--sample-rate",
+    required=True,
+    type=click.Choice(["32000", "40000", "48000"]),
+    help="Training sampling rate.",
+)
+@click.option(
+    "--batch-size", type=click.IntRange(1, 50), default=8, help="Training batch size."
+)
+@click.option("--gpu", type=str, default="0", help="GPU device to use.")
+@click.option(
+    "--pretrained/--no-pretrained",
+    default=True,
+    help="Use pretrained model for initialisation.",
+)
+@click.option(
+    "--custom-pretrained",
+    is_flag=True,
+    default=False,
+    help="Use custom pretrained model paths.",
+)
+@click.option(
+    "--g-pretrained-path", type=str, default=None, help="Path to pretrained generator."
+)
+@click.option(
+    "--d-pretrained-path",
+    type=str,
+    default=None,
+    help="Path to pretrained discriminator.",
+)
+@click.option(
+    "--cleanup", is_flag=True, default=False, help="Clean up previous training attempt."
+)
+@click.option(
+    "--cache-data-in-gpu",
+    is_flag=True,
+    default=False,
+    help="Cache training data in GPU memory.",
+)
+@click.option(
+    "--index-algorithm",
+    type=click.Choice(["Auto", "Faiss", "KMeans"]),
+    default="Auto",
+    help="Index file generation algorithm.",
+)
+def train(**kwargs):
+    """Train an RVC model."""
+    result = run_train_script(
+        model_name=kwargs["model_name"],
+        save_every_epoch=kwargs["save_every_epoch"],
+        save_only_latest=kwargs["save_only_latest"],
+        save_every_weights=kwargs["save_every_weights"],
+        total_epoch=kwargs["total_epoch"],
+        sample_rate=int(kwargs["sample_rate"]),
+        batch_size=kwargs["batch_size"],
+        gpu=kwargs["gpu"],
+        pretrained=kwargs["pretrained"],
+        cleanup=kwargs["cleanup"],
+        index_algorithm=kwargs["index_algorithm"],
+        cache_data_in_gpu=kwargs["cache_data_in_gpu"],
+        custom_pretrained=kwargs["custom_pretrained"],
+        g_pretrained_path=kwargs.get("g_pretrained_path"),
+        d_pretrained_path=kwargs.get("d_pretrained_path"),
+        vocoder=kwargs["vocoder"],
+        checkpointing=kwargs["checkpointing"],
+    )
+    click.echo(result)
+
+
+@cli.command()
+@click.option("--model-name", required=True, help="Name of the model.")
+@click.option(
+    "--index-algorithm",
+    type=click.Choice(["Auto", "Faiss", "KMeans"]),
+    default="Auto",
+    help="Index file generation algorithm.",
+)
+def index(**kwargs):
+    """Generate an index file for an RVC model."""
+    result = run_index_script(kwargs["model_name"], kwargs["index_algorithm"])
+    click.echo(result)
+
+
+@cli.command()
+@click.option("--pth-path", required=True, help="Path to the .pth model file.")
+def model_information(**kwargs):
+    """Display information about a trained model."""
+    run_model_information_script(kwargs["pth_path"])
+
+
+@cli.command()
+@click.option("--model-name", required=True, help="Name of the new fused model.")
+@click.option("--pth-path-1", required=True, help="Path to the first .pth model.")
+@click.option("--pth-path-2", required=True, help="Path to the second .pth model.")
+@click.option(
+    "--ratio",
+    type=click.Choice([str(i / 10) for i in range(11)]),
+    default="0.5",
+    help="Blending ratio (0.0 - 1.0).",
+)
+def model_blender(**kwargs):
+    """Fuse two RVC models together."""
+    kwargs["ratio"] = float(kwargs["ratio"])
+    msg, path = run_model_blender_script(
+        kwargs["model_name"],
+        kwargs["pth_path_1"],
+        kwargs["pth_path_2"],
+        kwargs["ratio"],
+    )
+    click.echo(f"{msg} {path}")
+
+
+@cli.command()
+def tensorboard():
+    """Launch TensorBoard for monitoring training progress."""
+    run_tensorboard_script()
+
+
+@cli.command()
+@click.option("--model-link", required=True, help="Direct link to the model file.")
+def download(**kwargs):
+    """Download a model from a provided link."""
+    result = run_download_script(kwargs["model_link"])
+    click.echo(result)
+
+
+@cli.command()
+@click.option(
+    "--pretraineds-hifigan/--no-pretraineds-hifigan",
+    default=True,
+    help="Download pretrained HiFi-GAN models.",
+)
+@click.option("--models/--no-models", default=True, help="Download additional models.")
+@click.option("--exe/--no-exe", default=True, help="Download required executables.")
+def prerequisites(**kwargs):
+    """Install prerequisites for RVC."""
+    result = run_prerequisites_script(
+        kwargs["pretraineds_hifigan"], kwargs["models"], kwargs["exe"]
+    )
+    click.echo(result)
+
+
+@cli.command()
+@click.option("--input-path", required=True, help="Path to the input audio file.")
+def audio_analyzer(**kwargs):
+    """Analyze an audio file and display information."""
+    run_audio_analyzer_script(kwargs["input_path"])
+
+
+def main():
+    cli()
+
+
+if __name__ == "__main__":
+    main()

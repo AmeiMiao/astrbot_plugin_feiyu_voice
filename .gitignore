@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+.runtime/
+outputs/
+runtime.local.json
+voice_service.json
+singing.json
+*.local.*
+.env
+*.pth
+*.pt
+*.index
+*.bin
+*.wav

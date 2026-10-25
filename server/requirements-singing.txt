@@ -1,0 +1,5 @@
+# Isolated CPU frontend; GPU inference uses the existing pinned WSL environments.
+music21==9.9.2
+mido==1.3.3
+pypinyin==0.55.0
+soundfile==0.14.0

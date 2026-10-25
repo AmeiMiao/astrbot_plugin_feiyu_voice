@@ -1,0 +1,42 @@
+{
+  "schema": "feiyu-singing-config-v1",
+  "rvc_package": "models/FeiyuVoice-RVC",
+  "rvc_package_id": "FeiyuVoice-RVC-v1",
+  "svs_runtime": {
+    "distribution": "Ubuntu-24.04",
+    "python": "/absolute/path/to/soulx/environment/bin/python",
+    "repo": "/absolute/path/to/SoulX-Singer",
+    "commit": "81aeb3ae772c70093c3de74dc23c92d983801ae4",
+    "code_sha256": {
+      "cli/inference.py": "15eb6a8d5467ec798b8f9a10df7dc785a7ed368530b958fa03f995cfb1a1f7ed",
+      "soulxsinger/models/soulxsinger.py": "7571a7baf845a02c5a2f4f4b891783e7dcbcad1d5772fa205685cf8e4e4a4405",
+      "soulxsinger/utils/data_processor.py": "14baf4c7784cea85bd58f0c29bd504d3ae46809931c0d40b16183a39581290cb",
+      "soulxsinger/config/soulxsinger.yaml": "d164c978dde6f57e1075bc21ef5f9b7b27895267f35b735cebe863418492be38",
+      "soulxsinger/utils/phoneme/phone_set.json": "1f28c4fdf8e9b68af42ef706b92b7fa86eb857555610ba271d84148776d5c3b8"
+    }
+  },
+  "rvc_runtime": {
+    "distribution": "Ubuntu-24.04",
+    "python": "/absolute/path/to/applio/environment/bin/python"
+  },
+  "svs_weight": {
+    "path": "models/SoulX-Singer/model.pt",
+    "sha256": "447eaf41f91a6b6659d55e9ec3c9b809221724fb8592aebaec35a23751a5b500"
+  },
+  "phoneset": {
+    "path": "assets/singing/phone_set.json",
+    "sha256": "1f28c4fdf8e9b68af42ef706b92b7fa86eb857555610ba271d84148776d5c3b8"
+  },
+  "prompt": {
+    "id": "your-reference",
+    "annotation_status": "User-provided aligned reference",
+    "audio": {
+      "path": "references/prompt.wav",
+      "sha256": "FILL_SHA256"
+    },
+    "metadata": {
+      "path": "references/prompt.json",
+      "sha256": "FILL_SHA256"
+    }
+  }
+}

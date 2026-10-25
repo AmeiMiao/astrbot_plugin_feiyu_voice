@@ -1,0 +1,17 @@
+[
+  {
+    "url": "https://huggingface.co/IAHispano/Applio/resolve/b81f9708367b124b29a47788e4c89b721166234f/Resources/predictors/rmvpe.pt",
+    "destination": "rvc/models/predictors/rmvpe.pt",
+    "sha256": "6d62215f4306e3ca278246188607209f09af3dc77ed4232efdd069798c4ec193"
+  },
+  {
+    "url": "https://huggingface.co/IAHispano/Applio/resolve/b81f9708367b124b29a47788e4c89b721166234f/Resources/embedders/contentvec/pytorch_model.bin",
+    "destination": "rvc/models/embedders/contentvec/pytorch_model.bin",
+    "sha256": "d8dd400e054ddf4e6be75dab5a2549db748cc99e756a097c496c099f65a4854e"
+  },
+  {
+    "url": "https://huggingface.co/IAHispano/Applio/resolve/b81f9708367b124b29a47788e4c89b721166234f/Resources/embedders/contentvec/config.json",
+    "destination": "rvc/models/embedders/contentvec/config.json",
+    "sha256": "2ddde063b795d38d9051a7215a092fecf4cfe148b54251e38de51d88d356898b"
+  }
+]
