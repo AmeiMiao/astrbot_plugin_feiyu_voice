@@ -1,0 +1,21 @@
+{
+  "schema": "feiyu-colab-release-pins-v1",
+  "source_repo": "https://github.com/Esmerubphire/astrbot_plugin_feiyu_voice.git",
+  "source_commit": "7baff58fdb4c4472a392be94da6dfa9690d96a8b",
+  "python": "3.11.17",
+  "uv": "0.13.5",
+  "rvc": {
+    "repo": "Esmerubphire/FeiyuVoice-RVC",
+    "revision": "04e5011b72341a742ef17a718d5da0435343f893",
+    "hub_version": "1.16.1",
+    "checksums_sha256": "9060f8bed5445bcc04f26b46965af4bd31ecc7ad108cc08426434920dcdab647",
+    "manifest_sha256": "bfc33a35de1f30448c459d2bd9f28afb16bac34d6df8709e3405fb741d4ce223"
+  },
+  "tts": {
+    "repo": "Esmerubphire/FeiyuVoice-CosyVoice3",
+    "revision": "f37e9d1dda26e8b45b4e9f1b4c347c0a07b797e2",
+    "hub_version": "0.36.2",
+    "checksums_sha256": "6e6393dd05ef5bb3a8b59713a44ef3bac2fc96bd49ba4d651f4b37ff9b771a25",
+    "manifest_sha256": "9f39074aba4d6a422a98b7a5e0bfc0a7463666669da226be55c85b67ccbc0edd"
+  }
+}

@@ -4,6 +4,22 @@
 
 想先了解能做什么，读这一页。让 AI 自己安装、自己调用，请把 [《小肥鱼的声音指南》](server/INSTALL_AGENT.md) 交给它。
 
+## Run on Google Colab
+
+无需安装本机 Python、WSL 或 CUDA，可以分别打开下面两份独立的推理 Notebook：
+
+| 功能 | 入口 |
+|---|---|
+| FeiyuVoice RVC · 上传干净人声换色 | [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Esmerubphire/astrbot_plugin_feiyu_voice/blob/main/colab/FeiyuVoice_RVC.ipynb) |
+| FeiyuVoice CosyVoice3 TTS · 可爱／温柔说话 | [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Esmerubphire/astrbot_plugin_feiyu_voice/blob/main/colab/FeiyuVoice_TTS.ipynb) |
+
+1. 点击 Open in Colab，在 Runtime / Change runtime type 选择 GPU。
+2. 按顺序运行初始化和模型下载单元格；第一次运行需要下载模型与依赖。
+3. RVC 上传 WAV／MP3／FLAC 干净人声；TTS 选择声线并输入文本。
+4. 运行推理，在 Notebook 中试听，再下载 WAV。
+
+免费 GPU 不保证随时可用；型号、显存和会话时长由平台分配。**真实 Colab GPU 验收尚未完成**，请查看 [使用说明](colab/README.md) 和 [验证范围](colab/VALIDATION.md)。本入口只做交互式推理，不启动 WebUI 或公网服务。Colab [当前政策](https://research.google.com/colaboratory/faq.html)禁止 creating deepfakes；素材授权不自动等于平台批准，请核对用途，受限时使用获准的本地环境。
+
 ## 你想让小肥鱼做什么
 
 | 你提供什么 | 小肥鱼可以做什么 | 需要的组件 |
