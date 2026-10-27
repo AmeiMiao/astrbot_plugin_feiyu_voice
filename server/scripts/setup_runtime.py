@@ -24,14 +24,25 @@ def run(command, **kwargs):
     subprocess.run([str(x) for x in command], check=True, **kwargs)
 
 
+def native_windows():
+    return sys.platform == "win32"
+
+
+def venv_python(destination):
+    return destination / ("venv/Scripts/python.exe" if native_windows() else "venv/bin/python")
+
+
 def plan(backend, engine, destination, python):
     preset = json.loads((ROOT / "runtime_profiles" / (backend + ".json")).read_text())
     stack = preset["engines"][engine]
     venv, repo = destination / "venv", destination / "source"
-    executable = venv / "bin/python"
+    executable = venv_python(destination)
     constraint = destination / "torch-constraints.txt"
+    # Native Windows has no system Python 3.11 to rely on: uv provisions it.
+    create = (["uv", "venv", "--seed", "--python", preset["python"], str(venv)] if native_windows()
+              else [python, "-m", "venv", str(venv)])
     return preset, stack, [
-        [python, "-m", "venv", str(venv)],
+        create,
         [str(executable), "-m", "pip", "install", "--upgrade", "pip"],
         [str(executable), "-m", "pip", "install", "--index-url", preset["torch_index"],
          "torch==" + stack["torch"], "torchaudio==" + stack["torchaudio"]],
@@ -53,8 +64,11 @@ def build_profile(preset, stack, engine, python, repo, distribution):
     profile = dict(schema="feiyu-runtime-v1", engine=engine, backend=preset["backend"],
                    distribution=distribution, python=str(python), repo=str(repo), commit=SOURCES[engine][1],
                    torch_version=stack["torch"], torchaudio_version=stack["torchaudio"], precision=stack["precision"],
+                   host="windows" if native_windows() else "wsl",
                    f0_device=stack.get("f0_device", "cpu"), onnx_provider="CPUExecutionProvider",
                    source_sha256=source_manifest(repo), hardware_validation=preset["hardware_validation"])
+    if preset.get("experimental"):
+        profile["experimental"] = True
     library = Path(subprocess.check_output([str(python), "-c", "import sys; print(sys.base_prefix + '/lib')"], text=True).strip())
     if list(library.glob("libpython3.11.so*")):
         profile["python_library_dir"] = str(library)
@@ -66,7 +80,7 @@ def build_profile(preset, stack, engine, python, repo, distribution):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--backend", required=True, choices=("cuda", "rocm"))
+    parser.add_argument("--backend", required=True, choices=("cuda", "rocm", "xpu"))
     parser.add_argument("--engine", required=True, choices=tuple(SOURCES))
     parser.add_argument("--destination", required=True, type=Path)
     parser.add_argument("--python", default="python3.11")
@@ -79,13 +93,20 @@ def main():
         print(json.dumps(dict(commands=commands, source=SOURCES[args.engine], profile=str(dest / "runtime.local.json"),
                              hardware_validation=preset["hardware_validation"]), indent=2))
         return 0
-    if sys.platform != "linux" or platform.machine() != "x86_64":
-        parser.error("Run this installer INSIDE x86_64 WSL/Linux, not Windows Python")
+    windows = native_windows()
+    if windows and args.backend != "xpu":
+        parser.error("Native Windows installs are only provided for Intel XPU; run CUDA/ROCm inside WSL")
+    if (sys.platform not in ("linux", "win32")) or platform.machine().lower() not in ("x86_64", "amd64"):
+        parser.error("Run this installer on x86_64 Linux/WSL, or on Windows for Intel XPU")
     if dest.exists():
         parser.error("Destination already exists. Use a new directory; never modify an active environment")
-    version = subprocess.check_output([args.python, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"], text=True).strip()
-    if version != preset["python"]:
-        parser.error("This preset requires Python " + preset["python"])
+    if windows:
+        if not shutil.which("uv"):
+            parser.error("Install uv first (it provisions Python " + preset["python"] + "): https://docs.astral.sh/uv/")
+    else:
+        version = subprocess.check_output([args.python, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"], text=True).strip()
+        if version != preset["python"]:
+            parser.error("This preset requires Python " + preset["python"])
     if not shutil.which("git") or not shutil.which("ffmpeg"):
         parser.error("Install git and ffmpeg first (see INSTALL_AGENT.md system packages)")
     dest.mkdir(parents=True)
@@ -93,7 +114,7 @@ def main():
     constraint.write_text("torch==" + stack["torch"] + "\ntorchaudio==" + stack["torchaudio"] + "\n")
     repo = dest / "source"
     url, commit = SOURCES[args.engine]
-    run(["git", "clone", "--no-checkout", url, repo])
+    run(["git", "-c", "core.autocrlf=false", "clone", "--no-checkout", url, repo])
     run(["git", "-C", repo, "checkout", "--detach", commit])
     if args.engine == "tts":
         run(["git", "-C", repo, "submodule", "update", "--init", "--recursive"])
@@ -119,8 +140,8 @@ def main():
             temporary.replace(target)
     for command in commands:
         run(command)
-    executable = dest / "venv/bin/python"
-    if stack.get("torchcodec"):
+    executable = venv_python(dest)
+    if stack.get("torchcodec") and not windows:
         run([executable, "-m", "pip", "install", "--index-url", "https://download.pytorch.org/whl/cpu",
              "torchcodec==" + stack["torchcodec"], "-c", constraint])
     # Freeze the fully resolved environment and reject inconsistent dependencies.

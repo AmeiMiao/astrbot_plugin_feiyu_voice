@@ -1,2 +1,3 @@
 server/runtime_compat/Applio/** -text whitespace=cr-at-eol
 colab/** text eol=lf
+server/assets/singing/phone_set.json -text

@@ -8,8 +8,9 @@
   "tests": {
     "legacy_service": 17,
     "score_frontend": 18,
-    "runtime_and_managed_http": 15,
-    "standalone_contract": 2
+    "runtime_and_managed_http": 25,
+    "standalone_contract": 2,
+    "colab_contracts": 18
   },
   "cuda": {
     "gpu": "NVIDIA GeForce RTX 5090 Laptop GPU",
@@ -59,7 +60,158 @@
   "limits": [
     "No AMD kernel/speed/VRAM/audio certification",
     "No new subjective audio approval",
-    "No new QQ/WeChat or natural-language tool-selection test"
+    "No new QQ/WeChat or natural-language tool-selection test",
+    "XPU: Windows validation used one Arc 130T iGPU; Linux validation used one Arc A770M; other devices and drivers are not certified",
+    "XPU: audio was checked for validity and shape, not by listening against the CUDA output",
+    "Linux XPU: SVS diagnostics passed, but singing audio was not run without the extra weight and aligned reference"
   ],
-  "compatibility_source_exact_bytes_preserved": true
+  "compatibility_source_exact_bytes_preserved": true,
+  "xpu": {
+    "status": "experimental",
+    "date": "2026-10-27",
+    "host": "native Windows 11 (no WSL)",
+    "gpu": "Intel(R) Arc(TM) 130T GPU (16GB), integrated, shared system memory; Core Ultra 5 225H; driver 32.0.101.8243",
+    "torch": "2.11.0+xpu (xpu runtime 20250302), Python 3.11",
+    "clean_install_with_setup_runtime": {
+      "tts": "passed",
+      "rvc": "passed",
+      "svs": "passed"
+    },
+    "diagnostics": "matmul, conv1d, fft and inference imports passed on xpu:0 for all three engines",
+    "tts": {
+      "steady_state_rtf_xpu": "3.0-3.8",
+      "steady_state_rtf_cpu_same_host": "6.1-8.4",
+      "note": "each service job starts a fresh worker process (about 1 minute to load); batch long text into one request"
+    },
+    "rvc": {
+      "rmvpe_on_xpu": "passed; 14 s of audio converted in 25 s versus 60 s with CPU RMVPE",
+      "output_vs_cpu_rmvpe": {
+        "correlation": 0.99999996,
+        "max_abs_difference": 0.000244
+      },
+      "preset_f0_device": "model"
+    },
+    "svs": {
+      "precision": "float32",
+      "demo_song_seconds": 15.0,
+      "elapsed_seconds": 231,
+      "gpu_peak_allocated_bytes": 3193352192,
+      "reference": "SoulX-Singer upstream example prompt (smoke test only, not a Feiyu reference)"
+    },
+    "http_routes": [
+      {
+        "route": "speech",
+        "style": "cute",
+        "audio_seconds": 5.44,
+        "job_seconds": 72,
+        "status": "success"
+      },
+      {
+        "route": "speech",
+        "style": "gentle",
+        "job_seconds": 90,
+        "status": "success"
+      },
+      {
+        "route": "voice-conversion",
+        "audio_seconds": 5.42,
+        "job_seconds": 39,
+        "status": "success"
+      },
+      {
+        "route": "singing",
+        "audio_seconds": 15.0,
+        "job_seconds": 161,
+        "status": "success"
+      }
+    ],
+    "unsupported_ops": "Contributor set PYTORCH_ENABLE_XPU_FALLBACK=1 and recorded no warnings; automatic fallback for arbitrary unsupported operators is not certified.",
+    "evidence_source": "contributor-reported hardware measurements; not independently reproduced by maintainer on Intel hardware"
+  },
+  "xpu_linux": {
+    "status": "experimental",
+    "date": "2026-10-27",
+    "host": "native Ubuntu 26.04.1 LTS",
+    "gpu": "Intel(R) Arc(TM) A770M Graphics",
+    "torch": "2.11.0+xpu (xpu runtime 20250302), Python 3.11",
+    "opencl": "intel-opencl-icd configured; clinfo reports two Intel OpenCL platforms; FFT passed",
+    "clean_install_with_setup_runtime": {
+      "tts": "passed",
+      "rvc": "passed",
+      "svs": "passed"
+    },
+    "diagnostics": "matmul, conv1d, fft and inference imports passed on xpu:0 for all three engines",
+    "tts": {
+      "cute_http": "passed; 6.56 seconds at 24000 Hz mono on xpu:0",
+      "gentle_http": "passed; 10.08 seconds at 24000 Hz mono on xpu:0",
+      "linux_compatibility": "The float64 HiFi-GAN F0 predictor runs on CPU because Linux XPU rejected its weight_norm kernel; llm, flow and the main hift network remain on XPU"
+    },
+    "rvc": {
+      "http": "passed; 6.54 seconds at 40000 Hz mono on xpu:0",
+      "f0_devices": [
+        "xpu:0"
+      ]
+    },
+    "svs": {
+      "diagnostics": "passed",
+      "audio_validation": "not_run; extra weight and aligned reference were not configured"
+    },
+    "subjective_listening": "pending",
+    "evidence_source": "contributor-reported hardware measurements; not independently reproduced by maintainer on Intel hardware"
+  },
+  "maintainer_experimental_acceptance": {
+    "date": "2026-10-27",
+    "pr": "https://github.com/Esmerubphire/astrbot_plugin_feiyu_voice/pull/1",
+    "contributor_head": "f960bcd122bc86d46bac94379f8783dc3bcaeced",
+    "activation": "explicit xpu profile only; existing CUDA/ROCm presets unchanged",
+    "fixes": [
+      "stateless path mapping for each SVS/RVC runtime and all four Windows/WSL stage combinations",
+      "platform-isolated Linux test; native Windows and Linux regression coverage",
+      "preserve Colab sources and Git line-ending safeguards"
+    ],
+    "tests": {
+      "windows_runtime_and_managed_http": 25,
+      "linux_backend_unit_subset": 19,
+      "legacy_api": 17,
+      "score_frontend": 18,
+      "standalone_contract": 2,
+      "colab": 18
+    },
+    "cuda_http_audio": [
+      {
+        "route": "speech",
+        "style": "cute",
+        "sample_rate": 24000,
+        "seconds": 6.56,
+        "sha256": "9b666b67339bdf9e86541d983198e8bbae386eb803d82b75cd52f80e21d33712"
+      },
+      {
+        "route": "speech",
+        "style": "gentle",
+        "sample_rate": 24000,
+        "seconds": 10.08,
+        "sha256": "73b49251f5734ed700dc677132a8ba276be194d746c453715cce2d80bf36b5a8"
+      },
+      {
+        "route": "voice-conversion",
+        "style": null,
+        "sample_rate": 40000,
+        "seconds": 2.72,
+        "sha256": "c83ddbbb8405a744f6a199e74e87a16e1242a310fddc7326abb28c80d1e9d4bb"
+      },
+      {
+        "route": "singing",
+        "style": null,
+        "sample_rate": 40000,
+        "seconds": 15.0,
+        "sha256": "080d6cb63565793a631b4449268fc4170df9394970f8a3e4edb154dce4f5d7b4"
+      }
+    ],
+    "tts_outputs_match_previous_same_input_sha256": true,
+    "intel_hardware_reproduced_by_maintainer": false,
+    "subjective_audio_approval": "not_run",
+    "colab_sources_unchanged": true,
+    "model_weights_changed": false,
+    "model_packages_republished": false
+  }
 }

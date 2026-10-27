@@ -34,9 +34,10 @@ def resolve(value):
     return path.resolve() if path.is_absolute() else (ROOT / path).resolve()
 
 
-def linux_path(path):
+def linux_path(path, runtime=None):
+    """Map for the target runtime, never for a previous stage's global state."""
     path = Path(path).resolve()
-    if os.name != "nt":
+    if os.name != "nt" or (runtime or {}).get("host") == "windows":
         return str(path)
     value = path.as_posix()
     if len(value) < 3 or value[1:3] != ":/":
@@ -45,10 +46,11 @@ def linux_path(path):
 
 
 def runtime_command(runtime, script, *arguments):
-    command = [runtime["python"], "-B", linux_path(script), *map(str, arguments)]
-    if runtime.get("python_library_dir"):
+    native_windows = os.name == "nt" and runtime.get("host") == "windows"
+    command = [runtime["python"], "-B", linux_path(script, runtime), *map(str, arguments)]
+    if runtime.get("python_library_dir") and not native_windows:
         command[:0] = ["env", "LD_LIBRARY_PATH=" + runtime["python_library_dir"]]
-    if os.name == "nt":
+    if os.name == "nt" and not native_windows:
         command = ["wsl.exe", "-d", runtime["distribution"], "-e", *command]
     return command
 
@@ -67,11 +69,11 @@ def run_logged(command, log_path):
             raise RuntimeError(f"推理进程退出码 {process.returncode}，详见 {log_path}\n{tail}")
 
 
-def input_copy(source, folder, name):
+def input_copy(source, folder, name, runtime=None):
     source = Path(source).resolve()
     destination = folder / name
     shutil.copyfile(source, destination)
-    return dict(original=str(source), snapshot=linux_path(destination), sha256=sha(destination))
+    return dict(original=str(source), snapshot=linux_path(destination, runtime), sha256=sha(destination))
 
 
 def finalize_audio(source, destination, expected_seconds):
@@ -174,13 +176,13 @@ def synthesize(score, *, lyrics=None, lyrics_file=None, pinyin_file=None, track=
     try:
         inputs = folder / "inputs"
         inputs.mkdir()
-        result["inputs"] = dict(score=input_copy(score, inputs, "score" + score.suffix.lower()))
+        result["inputs"] = dict(score=input_copy(score, inputs, "score" + score.suffix.lower(), cfg["svs_runtime"]))
         (inputs / "lyrics.txt").write_text(lyrics if lyrics is not None else "\n".join(n.lyric for n in notes), encoding="utf-8")
         result["inputs"]["lyrics_sha256"] = sha(inputs / "lyrics.txt")
         if pinyin_file:
-            result["inputs"]["pinyin"] = input_copy(pinyin_file, inputs, "pinyin.txt")
+            result["inputs"]["pinyin"] = input_copy(pinyin_file, inputs, "pinyin.txt", cfg["svs_runtime"])
         if regions:
-            result["inputs"]["regions"] = input_copy(regions, inputs, "regions.json")
+            result["inputs"]["regions"] = input_copy(regions, inputs, "regions.json", cfg["svs_runtime"])
         save(folder / "config_snapshot.json", cfg)
         save(folder / "alignment.json", {k: v for k, v in compiled.items() if k != "metadata"})
         save(folder / "target_metadata.json", compiled["metadata"])
@@ -200,15 +202,15 @@ def synthesize(score, *, lyrics=None, lyrics_file=None, pinyin_file=None, track=
             path = resolve(item["path"])
             if sha(path) != item["sha256"]:
                 raise ValueError(f"SVS 参考 {role} 与已验证版本不一致。")
-            prompt_items[role] = dict(path=linux_path(path), sha256=item["sha256"])
+            prompt_items[role] = dict(path=linux_path(path, cfg["svs_runtime"]), sha256=item["sha256"])
         result["svs_prompt"] = dict(id=prompt["id"], annotation_status=prompt["annotation_status"], **prompt_items)
         svs = folder / "svs"
         svs.mkdir()
-        job = dict(runtime=cfg["svs_runtime"], weight=dict(path=linux_path(resolve(cfg["svs_weight"]["path"])),
+        job = dict(runtime=cfg["svs_runtime"], weight=dict(path=linux_path(resolve(cfg["svs_weight"]["path"]), cfg["svs_runtime"]),
                                                         sha256=cfg["svs_weight"]["sha256"]),
-                   prompt=prompt_items, phoneset=dict(path=linux_path(phoneset), sha256=sha(phoneset)),
-                   target=dict(path=linux_path(folder / "target_metadata.json"), sha256=result["target_metadata_sha256"]),
-                   output_dir=linux_path(svs), frames=compiled["frames"],
+                   prompt=prompt_items, phoneset=dict(path=linux_path(phoneset, cfg["svs_runtime"]), sha256=sha(phoneset)),
+                   target=dict(path=linux_path(folder / "target_metadata.json", cfg["svs_runtime"]), sha256=result["target_metadata_sha256"]),
+                   output_dir=linux_path(svs, cfg["svs_runtime"]), frames=compiled["frames"],
                    parameters=dict(control="score", auto_shift=False, pitch_shift=0,
                                    n_steps=32, cfg=1., fp16=cfg["svs_runtime"].get("precision", "float16") == "float16", seed=seed))
         save(svs / "job.json", job)
@@ -216,7 +218,7 @@ def synthesize(score, *, lyrics=None, lyrics_file=None, pinyin_file=None, track=
         save(folder / "result.json", result)
         print(f"正在按谱合成歌声（{len(compiled['metadata'])} 段）…", flush=True)
         run_logged(runtime_command(cfg["svs_runtime"], ROOT / "feiyu_singing/svs_worker.py",
-                                   "--job", linux_path(svs / "job.json")), svs / "execution.log")
+                                   "--job", linux_path(svs / "job.json", cfg["svs_runtime"])), svs / "execution.log")
         sr = load(svs / "result.json")
         if sr["status"] != "success" or sha(svs / "generated.wav") != sr["output_sha256"]:
             raise ValueError("SVS 未产生有效结果。")
@@ -239,15 +241,15 @@ def synthesize(score, *, lyrics=None, lyrics_file=None, pinyin_file=None, track=
             save(folder / "rvc_runtime_profile.json", profile)
             cfg["rvc_runtime"] = profile
             rvc_script = ROOT / "feiyu_runtime/worker.py"
-            rvc_prefix = ["--kind", "rvc", "--package", linux_path(package),
-                          "--profile", linux_path(folder / "rvc_runtime_profile.json")]
+            rvc_prefix = ["--kind", "rvc", "--package", linux_path(package, cfg["rvc_runtime"]),
+                          "--profile", linux_path(folder / "rvc_runtime_profile.json", cfg["rvc_runtime"])]
         command = runtime_command(cfg["rvc_runtime"], rvc_script, *rvc_prefix,
-                                  "--input", linux_path(svs / "generated.wav"), "--output-dir", linux_path(rvc))
+                                  "--input", linux_path(svs / "generated.wav", cfg["rvc_runtime"]), "--output-dir", linux_path(rvc, cfg["rvc_runtime"]))
         if not public_rvc:
-            command += ["--project-root", linux_path(ROOT)]
+            command += ["--project-root", linux_path(ROOT, cfg["rvc_runtime"])]
         # D76 cues are bound to the converted vocal, exactly as in the final package.
         if regions:
-            command += ["--regions", linux_path(inputs / "regions.json")]
+            command += ["--regions", linux_path(inputs / "regions.json", cfg["rvc_runtime"])]
         run_logged(command, folder / "rvc_execution.log")
         cover = load(rvc / "cover_result.json")
         if cover["status"] != "success" or cover["package"] != manifest["id"]:

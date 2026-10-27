@@ -24,6 +24,7 @@ def execute(job):
     backend, request, kind = job["backend"], job["request"], job["kind"]
     package = Path(backend["package"])
     managed = backend.get("adapter") == "managed"
+    runtime = backend["runtime"]
     runtime_path = Path(backend.get("runtime_path", package / "runtime.local.json"))
     if (
         sha(package / "manifest.json") != backend["manifest_sha256"]
@@ -52,8 +53,8 @@ def execute(job):
         profile_snapshot = folder / "runtime_profile.json"
         save(profile_snapshot, backend["runtime"])
         script = ROOT / "feiyu_runtime/worker.py"
-        prefix = ["--kind", "tts" if kind == "speech" else "rvc", "--package", linux_path(package),
-                  "--profile", linux_path(profile_snapshot)]
+        prefix = ["--kind", "tts" if kind == "speech" else "rvc", "--package", linux_path(package, runtime),
+                  "--profile", linux_path(profile_snapshot, runtime)]
     else:
         prefix = []
     if kind == "speech":
@@ -64,13 +65,13 @@ def execute(job):
             dict(
                 text=request["text"],
                 style=request["style"],
-                output_dir=linux_path(folder / "output"),
+                output_dir=linux_path(folder / "output", runtime),
             ),
         )
         # Some standalone Python builds require an explicit library search path.
-        rt = dict(distribution=runtime["distribution"], python=runtime["python"],
-                  python_library_dir=runtime.get("python_library_dir"))
-        command = runtime_command(rt, script, *prefix, "--request", linux_path(task))
+        rt = dict(distribution=runtime.get("distribution"), python=runtime["python"],
+                  python_library_dir=runtime.get("python_library_dir"), host=runtime.get("host"))
+        command = runtime_command(rt, script, *prefix, "--request", linux_path(task, runtime))
         run_logged(command, folder / "inference.log")
         receipt = load(folder / "output/result.json")
         source = folder / "output/speech.wav"
@@ -85,24 +86,25 @@ def execute(job):
     elif kind == "conversion":
         runtime = backend["runtime"]
         rt = dict(
-            distribution=runtime["distribution"] if managed else runtime["wsl_distribution"],
+            distribution=runtime.get("distribution") if managed else runtime["wsl_distribution"],
             python=runtime["python"] if managed else runtime["wsl_python"]
         )
         if managed:
             rt["python_library_dir"] = runtime.get("python_library_dir")
+            rt["host"] = runtime.get("host")
         command = runtime_command(
             rt,
             script,
             *prefix,
             "--input",
-            linux_path(job["audio_path"]),
+            linux_path(job["audio_path"], runtime),
             "--output-dir",
-            linux_path(folder / "output"),
+            linux_path(folder / "output", runtime),
         )
         if not public_rvc:
-            command += ["--project-root", linux_path(ROOT)]
+            command += ["--project-root", linux_path(ROOT, runtime)]
         if job.get("regions_path"):
-            command += ["--regions", linux_path(job["regions_path"])]
+            command += ["--regions", linux_path(job["regions_path"], runtime)]
         run_logged(command, folder / "inference.log")
         receipt = load(folder / "output/cover_result.json")
         applied = receipt.get(
@@ -133,7 +135,7 @@ def execute(job):
             backend["package_id"],
         )
         config["rvc_runtime"] = dict(
-            distribution=backend["runtime"]["distribution"] if managed else backend["runtime"]["wsl_distribution"],
+            distribution=backend["runtime"].get("distribution") if managed else backend["runtime"]["wsl_distribution"],
             python=backend["runtime"]["python"] if managed else backend["runtime"]["wsl_python"],
         )
         if managed:

@@ -11,7 +11,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from feiyu_runtime.common import prepare, verify_repo, verify_audio_library
+from feiyu_runtime.common import apply_backend_env, device_type, prepare, seed_all, verify_repo, verify_audio_library
 
 BUNDLE = None
 
@@ -104,6 +104,7 @@ def main(package, profile, argv=None):
         OMP_NUM_THREADS="4",
         PYTHONDONTWRITEBYTECODE="1",
     )
+    apply_backend_env(profile)
     os.chdir(repo)
     sys.path.insert(0, str(repo))
     import numpy as np
@@ -115,9 +116,10 @@ def main(package, profile, argv=None):
 
     runtime_info = prepare(torch, profile)
     verify_audio_library(profile)
-    if runtime_info["device"] == "cpu":
+    if runtime_info["backend"] in ("cpu", "xpu"):
+        # Upstream only auto-detects cuda/mps; the accelerator is chosen explicitly.
         from rvc.configs.config import Config
-        Config().device = "cpu"
+        Config().device = runtime_info["device"]
     f0_loads = []
     import rvc.infer.pipeline as pipeline_module
     original_rmvpe = pipeline_module.RMVPE
@@ -139,7 +141,7 @@ def main(package, profile, argv=None):
 
     def observe_load(self, *positional, **keywords):
         value = original_load(self, *positional, **keywords)
-        expected_device = "cpu" if runtime_info["device"] == "cpu" else "cuda"
+        expected_device = device_type(runtime_info["backend"])
         if next(self.net_g.parameters()).device.type != expected_device:
             raise RuntimeError("RVC network is not on the configured device")
         if (
@@ -168,8 +170,7 @@ def main(package, profile, argv=None):
         seed = manifest["seed"] + len(calls)
         random.seed(seed)
         np.random.seed(seed)
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
+        seed_all(torch, runtime_info["backend"], seed)
         calls.append(dict(seed=seed))
         return original_infer(self, *positional, **keywords)
 

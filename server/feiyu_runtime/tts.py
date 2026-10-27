@@ -5,8 +5,26 @@ from pathlib import Path
 import sys
 import time
 
-from feiyu_runtime.common import (checked_path, cpu_onnx_sessions, load, prepare,
-                                 save, sha, verify_audio_library, verify_package, verify_repo)
+from feiyu_runtime.common import (apply_backend_env, checked_path, cpu_onnx_sessions, device_type, load,
+                                 prepare, save, sha, verify_audio_library, verify_package, verify_repo)
+
+
+def move_to_xpu(torch, voice, device):
+    device = torch.device(device)
+    for name in ("llm", "flow", "hift"):
+        getattr(voice.model, name).to(device).eval()
+    voice.model.device = device
+    voice.frontend.device = device
+    if sys.platform == "linux":
+        # Linux XPU cannot run the float64 weight_norm kernel used by this predictor.
+        f0 = voice.model.hift.f0_predictor
+        f0.to("cpu").eval()
+        original_forward = f0.forward
+
+        def f0_forward(speech_feat, *args, **kwargs):
+            return original_forward(speech_feat.cpu(), *args, **kwargs)
+
+        f0.forward = f0_forward
 
 
 def main(package, profile, argv=None):
@@ -24,6 +42,7 @@ def main(package, profile, argv=None):
         raise ValueError("Output must be outside the package and runtime source")
     out.mkdir(parents=True, exist_ok=False)
     os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", PYTHONDONTWRITEBYTECODE="1", OMP_NUM_THREADS="4")
+    apply_backend_env(profile)
     os.chdir(repo)
     sys.path[:0] = [str(repo), str(repo / "third_party/Matcha-TTS")]
     import numpy as np
@@ -48,10 +67,14 @@ def main(package, profile, argv=None):
         state = torch.load(checkpoint, map_location="cpu", weights_only=True)
         voice.model.llm.load_state_dict(state, strict=True)
         del state
-    # Upstream selects cuda/CPU itself; verify every main network's actual device.
+    if info["backend"] == "xpu":
+        # Upstream only knows cuda/CPU: it loads on CPU, then the networks and the
+        # device used for its input tensors are moved to the Intel GPU.
+        move_to_xpu(torch, voice, info["device"])
+    # Verify every main network's actual device.
     for name in ("llm", "flow", "hift"):
         actual = next(getattr(voice.model, name).parameters()).device.type
-        if actual != ("cpu" if info["device"] == "cpu" else "cuda"):
+        if actual != device_type(info["backend"]):
             raise RuntimeError("Unexpected TTS network device: " + name)
     voice.model.llm.eval()
     params = manifest["inference"]

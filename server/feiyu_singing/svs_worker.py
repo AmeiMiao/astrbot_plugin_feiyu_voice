@@ -13,7 +13,7 @@ import traceback
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from feiyu_runtime.common import prepare, verify_audio_library, verify_repo
+from feiyu_runtime.common import accelerator, apply_backend_env, prepare, seed_all, verify_audio_library, verify_repo
 
 
 def load(path):
@@ -53,6 +53,8 @@ def main():
         for item in [job["weight"], job["phoneset"], job["target"], *job["prompt"].values()]:
             if sha(item["path"]) != item["sha256"]:
                 raise ValueError("Input/weight checksum differs: " + item["path"])
+        if managed:
+            apply_backend_env(runtime)
         os.chdir(repo)
         sys.path.insert(0, str(repo))
         import numpy as np
@@ -62,9 +64,11 @@ def main():
             runtime_info = prepare(torch, runtime)
             verify_audio_library(runtime)
             device = runtime_info["device"]
+            backend = runtime_info["backend"]
         else:
             device = "cuda"
-            runtime_info = dict(backend="hip" if torch.version.hip else "cuda", device=device,
+            backend = "hip" if torch.version.hip else "cuda"
+            runtime_info = dict(backend=backend, device=device,
                                 torch=str(torch.__version__))
         import cli.inference as official
         from soulxsinger.utils.data_processor import DataProcessor
@@ -91,17 +95,18 @@ def main():
         (out / "preflight.json").write_text(json.dumps(checks, indent=2), encoding="utf-8")
         if device == "cpu" and params["fp16"]:
             raise ValueError("CPU SVS requires float32")
+        if backend == "xpu" and params["fp16"]:
+            raise ValueError("XPU SVS requires float32 (upstream FP16 autocast is CUDA-only)")
         model = official.build_model(job["weight"]["path"], config, device=device, use_fp16=params["fp16"])
         random.seed(params["seed"])
         np.random.seed(params["seed"])
-        torch.manual_seed(params["seed"])
-        torch.cuda.manual_seed_all(params["seed"])
+        seed_all(torch, backend, params["seed"])
         call = SimpleNamespace(device=device, prompt_wav_path=job["prompt"]["audio"]["path"],
                                prompt_metadata_path=job["prompt"]["metadata"]["path"],
                                target_metadata_path=job["target"]["path"], phoneset_path=job["phoneset"]["path"],
                                save_dir=str(out), control="score", auto_shift=False, pitch_shift=0, use_fp16=params["fp16"])
         if device != "cpu":
-            torch.cuda.reset_peak_memory_stats()
+            accelerator(torch, backend).reset_peak_memory_stats()
         official.process(call, config, model)
         wave, rate = sf.read(out / "generated.wav", dtype="float32")
         expected_samples = job["frames"] * 480
@@ -113,8 +118,8 @@ def main():
                       duration_seconds=len(wave) / rate, peak=float(abs(wave).max()),
                       near_full_scale_samples=int((abs(wave) >= .999).sum()), parameters=params,
                       runtime=runtime_info,
-                      gpu=torch.cuda.get_device_name() if device != "cpu" else None,
-                      gpu_peak_allocated_bytes=torch.cuda.max_memory_allocated() if device != "cpu" else None,
+                      gpu=accelerator(torch, backend).get_device_name() if device != "cpu" else None,
+                      gpu_peak_allocated_bytes=accelerator(torch, backend).max_memory_allocated() if device != "cpu" else None,
                       model_sha256=job["weight"]["sha256"], model_commit=commit,
                       determinism="Seed recorded; warn-only kernels; bitwise reproducibility not assumed")
     except Exception as exc:

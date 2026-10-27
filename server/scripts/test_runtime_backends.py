@@ -10,8 +10,9 @@ from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from feiyu_runtime.common import (backend_name, cpu_onnx_sessions, load, prepare, save,
-                                 sha, validate_profile, verify_package)
+from feiyu_runtime.common import (apply_backend_env, backend_name, cpu_onnx_sessions, device_type, load,
+                                 prepare, save, seed_all, sha, validate_profile, verify_package)
+from feiyu_singing import pipeline
 from feiyu_voice_service.registry import Registry
 from feiyu_voice_service.worker import execute
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -27,10 +28,16 @@ def profile(engine="tts", backend="hip"):
 
 
 def torch_stub(backend="hip", available=True):
+    # Only the build matching `backend` has its accelerator namespace usable.
+    def accelerator(name):
+        return SimpleNamespace(is_available=lambda: available and backend == name,
+                               get_device_name=lambda n: "test GPU", manual_seed_all=Mock())
     return SimpleNamespace(__version__="test-version",
         version=SimpleNamespace(hip="7.2" if backend == "hip" else None,
-                                cuda="12.8" if backend == "cuda" else None),
-        cuda=SimpleNamespace(is_available=lambda: available, get_device_name=lambda n: "test GPU"),
+                                cuda="12.8" if backend == "cuda" else None,
+                                xpu="20260100" if backend == "xpu" else None),
+        cuda=accelerator("hip" if backend == "hip" else "cuda"), xpu=accelerator("xpu"),
+        manual_seed=Mock(),
         backends=SimpleNamespace(cuda=SimpleNamespace(enable_flash_sdp=Mock(),
             enable_mem_efficient_sdp=Mock(), enable_math_sdp=Mock())), set_num_threads=Mock())
 
@@ -63,6 +70,159 @@ class RuntimeTests(unittest.TestCase):
         result = prepare(torch_stub(), profile())
         self.assertEqual(result["backend"], "hip")
         self.assertEqual(result["device"], "cuda:0")
+
+    def test_xpu_preset_is_fp32_and_installs_only_xpu_wheels(self):
+        preset = load(ROOT / "runtime_profiles/xpu.json")
+        self.assertEqual(preset["backend"], "xpu")
+        self.assertTrue(preset["experimental"])
+        self.assertTrue(preset["torch_index"].endswith("/xpu"))
+        for stack in preset["engines"].values():
+            self.assertTrue(stack["torch"].endswith("+xpu"))
+            self.assertEqual(stack["precision"], "float32")
+
+    def test_xpu_uses_xpu_device_and_leaves_cuda_sdp_alone(self):
+        torch = torch_stub("xpu")
+        result = prepare(torch, profile(backend="xpu"))
+        self.assertEqual((result["backend"], result["device"], result["gpu"]), ("xpu", "xpu:0", "test GPU"))
+        self.assertEqual(result["xpu"], "20260100")
+        torch.backends.cuda.enable_flash_sdp.assert_not_called()
+
+    def test_xpu_profile_refuses_other_wheels_and_fp16(self):
+        for torch in (torch_stub("cuda"), torch_stub("hip"), torch_stub("xpu", False)):
+            with self.assertRaises(RuntimeError):
+                prepare(torch, profile(backend="xpu"))
+        with self.assertRaises(RuntimeError):
+            prepare(torch_stub("xpu"), profile(backend="cuda"))
+        p = profile("svs", "xpu")
+        p["precision"] = "float16"
+        with self.assertRaises(ValueError):
+            validate_profile(p)
+
+    def test_backend_helpers(self):
+        self.assertEqual([backend_name(torch_stub(b)) for b in ("hip", "cuda", "xpu")], ["hip", "cuda", "xpu"])
+        self.assertEqual([device_type(b) for b in ("cpu", "cuda", "hip", "xpu")], ["cpu", "cuda", "cuda", "xpu"])
+        torch = torch_stub("xpu")
+        seed_all(torch, "xpu", 7)
+        torch.manual_seed.assert_called_once_with(7)
+        torch.xpu.manual_seed_all.assert_called_once_with(7)
+        torch.cuda.manual_seed_all.assert_not_called()
+
+    def test_xpu_sets_fallback_environment_without_claiming_operator_coverage(self):
+        with patch.dict("os.environ", {}, clear=False):
+            sys.modules["os"].environ.pop("PYTORCH_ENABLE_XPU_FALLBACK", None)
+            apply_backend_env(profile(backend="cuda"))
+            self.assertNotIn("PYTORCH_ENABLE_XPU_FALLBACK", sys.modules["os"].environ)
+            apply_backend_env(profile(backend="xpu"))
+            self.assertEqual(sys.modules["os"].environ["PYTORCH_ENABLE_XPU_FALLBACK"], "1")
+
+    def test_native_windows_host_skips_wsl_wrapping_and_path_mapping(self):
+        native = dict(profile(backend="xpu"), host="windows", python="C:/env/python.exe")
+        with patch.object(pipeline, "os", SimpleNamespace(name="nt")):
+            command = pipeline.runtime_command(native, ROOT / "feiyu_runtime/worker.py", "--kind", "tts")
+            self.assertEqual(command[0], "C:/env/python.exe")
+            self.assertNotIn("wsl.exe", command)
+            self.assertEqual(pipeline.linux_path(ROOT, native), str(ROOT.resolve()))
+            with patch.object(pipeline, "linux_path", return_value="/mnt/c/repo/worker.py"):
+                wsl = pipeline.runtime_command(profile(), ROOT / "feiyu_runtime/worker.py")
+            self.assertEqual(wsl[:3], ["wsl.exe", "-d", "Ubuntu-24.04"])
+            self.assertIn("/mnt/c/repo/worker.py", wsl)
+
+    def test_native_linux_xpu_runs_python_directly(self):
+        native = dict(profile(backend="xpu"), host="wsl")
+        with patch.object(pipeline, "os", SimpleNamespace(name="posix")):
+            command = pipeline.runtime_command(native, ROOT / "feiyu_runtime/worker.py", "--kind", "tts")
+        self.assertEqual(command[0], "/test/environment/bin/python")
+        self.assertNotIn("wsl.exe", command)
+        self.assertEqual(command[2], str((ROOT / "feiyu_runtime/worker.py").resolve()))
+
+    def test_windows_paths_are_stateless_across_runtime_switches(self):
+        from pathlib import PureWindowsPath
+        class WindowsPath(PureWindowsPath):
+            def resolve(self):
+                return self
+        native = dict(profile(backend="xpu"), host="windows", python="C:/env/python.exe")
+        wsl = profile(backend="cuda")
+        with patch.object(pipeline, "os", SimpleNamespace(name="nt")), patch.object(pipeline, "Path", WindowsPath):
+            for first, second in ((native, wsl), (wsl, native)):
+                pipeline.runtime_command(first, "C:/repo/worker.py")
+                argument = pipeline.linux_path("C:/jobs/vocal.wav", second)
+                command = pipeline.runtime_command(second, "C:/repo/worker.py", "--input", argument)
+                if second is native:
+                    self.assertEqual(command[0], "C:/env/python.exe")
+                    self.assertEqual(command[-1], "C:\\jobs\\vocal.wav")
+                else:
+                    self.assertEqual(command[0], "wsl.exe")
+                    self.assertEqual(command[-1], "/mnt/c/jobs/vocal.wav")
+            # Legacy calls remain WSL mappings, even after a native command.
+            pipeline.runtime_command(native, "C:/repo/worker.py")
+            self.assertEqual(pipeline.linux_path("C:/jobs/vocal.wav"), "/mnt/c/jobs/vocal.wav")
+
+    def test_singing_serializes_each_stage_for_its_own_host(self):
+        """Exercise real orchestration for all native/WSL SVS->RVC combinations."""
+        from feiyu_singing import score as score_module
+        import itertools
+        for svs_host, rvc_host in itertools.product(("windows", "wsl"), repeat=2):
+            with self.subTest(svs=svs_host, rvc=rvc_host), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                package = root / "package"
+                package.mkdir()
+                save(package / "manifest.json", dict(id="test-rvc", schema="feiyu-rvc-release-v1"))
+                for name in ("score.abc", "weight.pt", "prompt.wav", "prompt.json"):
+                    (root / name).write_bytes(b"test fixture")
+                save(root / "phones.json", ["a"])
+                svs = dict(profile("svs", "xpu"), host=svs_host)
+                rvc = dict(profile("rvc", "xpu"), host=rvc_host)
+                save(root / "svs.json", svs)
+                save(root / "rvc.json", rvc)
+                config = dict(rvc_package=str(package), rvc_package_id="test-rvc", svs_runtime=svs,
+                    rvc_runtime=rvc, svs_runtime_profile=str(root / "svs.json"), rvc_runtime_profile=str(root / "rvc.json"),
+                    phoneset=dict(path=str(root / "phones.json"), sha256=sha(root / "phones.json")),
+                    svs_weight=dict(path=str(root / "weight.pt"), sha256=sha(root / "weight.pt")),
+                    prompt=dict(id="test", annotation_status="test", **{
+                        role: dict(path=str(root / name), sha256=sha(root / name))
+                        for role, name in (("audio", "prompt.wav"), ("metadata", "prompt.json"))}))
+                save(root / "config.json", config)
+                output = root / "output"
+                compiled = dict(events=[dict(phoneme="a")], duration_seconds=1, metadata=[], frames=50)
+                commands = []
+
+                def mapped(path, runtime=None):
+                    self.assertIsNotNone(runtime, "Every stage-bound path needs its target runtime")
+                    return runtime["host"] + ":" + str(path)
+
+                def run(command, log):
+                    commands.append(command)
+                    if len(commands) == 1:
+                        (output / "svs/generated.wav").write_bytes(b"svs audio fixture")
+                        save(output / "svs/result.json", dict(status="success", output_sha256=sha(output / "svs/generated.wav")))
+                    else:
+                        (output / "rvc").mkdir()
+                        (output / "rvc/rvc_native.wav").write_bytes(b"rvc audio fixture")
+                        save(output / "rvc/cover_result.json", dict(status="success", package="test-rvc",
+                            native_sha256=sha(output / "rvc/rvc_native.wav"), breath_attenuation_applied=False))
+
+                def finalize(source, dest, seconds):
+                    dest.write_bytes(source.read_bytes())
+                    return dict(sample_rate=40000)
+
+                with patch.object(score_module, "read_score", return_value=([], 1, {})), \
+                     patch.object(score_module, "compile_score", return_value=compiled), \
+                     patch.object(pipeline, "linux_path", side_effect=mapped), \
+                     patch.object(pipeline, "run_logged", side_effect=run), \
+                     patch.object(pipeline, "finalize_audio", side_effect=finalize), patch.object(pipeline, "make_preview"):
+                    pipeline.synthesize(root / "score.abc", lyrics="a", output_dir=output, config=root / "config.json")
+                job = load(output / "svs/job.json")
+                for item in [job["weight"], job["phoneset"], job["target"], *job["prompt"].values()]:
+                    self.assertTrue(item["path"].startswith(svs_host + ":"))
+                self.assertTrue(job["output_dir"].startswith(svs_host + ":"))
+                self.assertTrue(commands[0][-1].startswith(svs_host + ":"))
+                command = commands[1]
+                for option in ("--package", "--profile", "--input", "--output-dir"):
+                    self.assertTrue(command[command.index(option) + 1].startswith(rvc_host + ":"))
+
+    def test_unknown_host_rejected(self):
+        with self.assertRaises(ValueError):
+            validate_profile(dict(profile(backend="xpu"), host="macos"))
 
     def test_wrong_wheel_and_missing_gpu_fail(self):
         for torch in (torch_stub("cuda"), torch_stub("hip", False)):
