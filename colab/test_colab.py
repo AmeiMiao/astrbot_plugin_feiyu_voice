@@ -3,6 +3,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -146,7 +147,10 @@ class NotebookTests(unittest.TestCase):
             root = Path(directory)
             state = root / "rvc"
             state.mkdir()
-            fv.write(state / "ready.json", dict(lock_sha256=fv.sha(fv.HERE / "releases.json")))
+            package = root / "publication/server/feiyu_runtime"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text("")
+            fv.write(state / "ready.json", dict(lock_sha256=fv.sha(fv.HERE / "releases.json"), cuda_build="cu128"))
             fv.write(state / "runtime.local.json", dict(python="/test/python"))
             fv.write(state / "diagnostic.json", dict(status="success"))
             with patch.object(fv.sys, "platform", "linux"), patch.object(fv.platform, "machine", return_value="x86_64"), \
@@ -156,6 +160,126 @@ class NotebookTests(unittest.TestCase):
                 fv.setup("rvc", root)
                 self.assertEqual(run.call_count, 2)  # actual diagnostic on every initialization
                 clone.assert_not_called()
+
+    def test_cuda_auto_matches_kernel_and_driver_fallback(self):
+        for version, expected in (("12.8", "cu128"), ("12.9", "cu128"), ("13.0", "cu130"), ("13.2", "cu130")):
+            fake = types.SimpleNamespace(version=types.SimpleNamespace(cuda=version))
+            with patch.dict(sys.modules, {"torch": fake}), patch.object(fv.subprocess, "check_output") as query:
+                build, info = fv.select_cuda_build()
+                self.assertEqual(build, expected)
+                self.assertEqual(info["selection_source"], "kernel_torch")
+                query.assert_not_called()
+        with patch.dict(sys.modules, {"torch": None}), patch.object(
+            fv.subprocess, "check_output", return_value="| NVIDIA-SMI | CUDA Version: 13.0 |"
+        ):
+            build, info = fv.select_cuda_build()
+            self.assertEqual(build, "cu130")
+            self.assertEqual(info["selection_source"], "driver_capability")
+
+    def test_cuda_selection_is_explicit_and_rejects_unknown_builds(self):
+        for build in ("cu128", "cu130"):
+            with patch.object(fv.subprocess, "check_output") as query:
+                self.assertEqual(fv.select_cuda_build(build)[0], build)
+                query.assert_not_called()
+        with self.assertRaises(ValueError):
+            fv.select_cuda_build("cu999")
+        for hint in ("11.8", "12.6", "unknown"):
+            with patch.dict(sys.modules, {"torch": types.SimpleNamespace(version=types.SimpleNamespace(cuda=hint))}):
+                with self.assertRaises(RuntimeError):
+                    fv.select_cuda_build()
+
+    def test_cuda_preset_updates_all_pins_without_mutating_shared_preset(self):
+        base = dict(torch_index="https://download.pytorch.org/whl/cu128", engines={
+            name: dict(torch="2.11.0+cu128", torchaudio="2.11.0+cu128", precision="float32", f0_device="model")
+            for name in ("rvc", "tts")})
+        snapshot = json.dumps(base)
+        for engine in ("rvc", "tts"):
+            preset = fv.colab_preset(base, engine, "cu130")
+            self.assertTrue(preset["torch_index"].endswith("/cu130"))
+            self.assertEqual(preset["engines"][engine]["torch"], "2.11.0+cu130")
+            self.assertEqual(preset["engines"][engine]["torchaudio"], "2.11.0+cu130")
+            self.assertEqual(preset["engines"][engine]["torchcodec"], "0.11.0+cpu")
+            self.assertEqual(preset["engines"][engine]["precision"], "float32")
+        self.assertEqual(json.dumps(base), snapshot)
+
+    def test_direct_cli_resolves_runtime_without_pythonpath_or_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "publication/server/feiyu_runtime"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text("")
+            (package / "common.py").write_text(
+                "def verify_package(*args): raise RuntimeError('RUNTIME_IMPORT_REACHED')\n"
+                "prepare = verify_audio_library = verify_repo = lambda *args: None\n")
+            (package / "tts.py").write_text("def main(*args): raise RuntimeError('RUNTIME_IMPORT_REACHED')\n")
+            for engine in ("rvc", "tts"):
+                state = root / engine
+                state.mkdir()
+                fv.write(state / "runtime.local.json", {})
+            request = root / "request.json"
+            fv.write(request, dict(style="cute", text="hello"))
+            env = dict(os.environ)
+            env.pop("PYTHONPATH", None)
+            for engine in ("rvc", "tts"):
+                result = subprocess.run([sys.executable, "-B", str(fv.HERE / "feiyu_colab.py"), engine,
+                    "--engine", engine, "--root", str(root), "--request", str(request)],
+                    cwd=root, env=env, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)  # stop before any real model imports
+                self.assertIn("RUNTIME_IMPORT_REACHED", result.stderr)
+                self.assertNotIn("ModuleNotFoundError", result.stderr)
+            self.assertFalse((fv.HERE / "feiyu_runtime").exists())
+
+    def test_fresh_setup_cu130_keeps_install_constraints_and_profile_consistent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            server = root / "publication/server"
+            (server / "feiyu_runtime").mkdir(parents=True)
+            (server / "feiyu_runtime/__init__.py").write_text("")
+            (server / "runtime_profiles").mkdir()
+            base = dict(torch_index="https://download.pytorch.org/whl/cu128", engines=dict(
+                tts=dict(torch="2.11.0+cu128", torchaudio="2.11.0+cu128", precision="float32")))
+            fv.write(server / "runtime_profiles/cuda.json", base)
+            (server / "runtime_profiles/requirements-tts.txt").write_text("numpy==1.26.4\nwetext==0.0.4\n")
+            commands = []
+
+            def execute(command, **kwargs):
+                commands.append([str(x) for x in command])
+                if "--output" in command:
+                    fv.write(command[command.index("--output") + 1], dict(status="success"))
+
+            def profile(preset, stack, engine, python, source, distribution):
+                return dict(python=str(python), torch_version=stack["torch"], torchaudio_version=stack["torchaudio"])
+
+            installer = types.SimpleNamespace(SOURCES=dict(tts=("test/source", "a" * 40)), build_profile=profile)
+            with patch.object(fv.sys, "platform", "linux"), patch.object(fv.platform, "machine", return_value="x86_64"), \
+                 patch.object(fv, "check_gpu"), patch.object(fv, "need_disk"), patch.object(fv, "clone_pinned"), \
+                 patch.object(fv, "select_cuda_build", return_value=("cu130", dict(selection_source="kernel_torch"))), \
+                 patch.object(fv.subprocess, "run", return_value=types.SimpleNamespace(stdout="install ok installed")), \
+                 patch.object(fv, "run", side_effect=execute), patch.dict(sys.modules, {"setup_runtime": installer}), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                fv.setup("tts", root)
+            state = root / "tts"
+            actual = fv.read(state / "runtime.local.json")
+            self.assertEqual(actual["torch_version"], "2.11.0+cu130")
+            self.assertEqual(actual["torchaudio_version"], "2.11.0+cu130")
+            self.assertEqual(fv.read(state / "ready.json")["cuda_build"], "cu130")
+            self.assertEqual((state / "torch-constraints.txt").read_text(), "torch==2.11.0+cu130\ntorchaudio==2.11.0+cu130\n")
+            installs = "\n".join(" ".join(c) for c in commands)
+            self.assertIn("https://download.pytorch.org/whl/cu130", installs)
+            self.assertNotIn("+cu128", installs)
+            self.assertEqual(fv.read(server / "runtime_profiles/cuda.json"), base)
+
+    def test_cuda_build_switch_does_not_overwrite_existing_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "rvc"
+            state.mkdir()
+            fv.write(state / "ready.json", dict(lock_sha256=fv.sha(fv.HERE / "releases.json"), cuda_build="cu128"))
+            with patch.object(fv.sys, "platform", "linux"), patch.object(fv.platform, "machine", return_value="x86_64"), \
+                 patch.object(fv, "check_gpu"), patch.object(fv, "run") as run:
+                with self.assertRaisesRegex(RuntimeError, "另一 CUDA build"):
+                    fv.setup("rvc", root, cuda_build="cu130")
+                run.assert_not_called()
 
     def test_tts_rejects_unknown_style_and_empty_text(self):
         for request in (dict(style="other", text="hello"), dict(style="cute", text="  ")):

@@ -11,6 +11,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -100,6 +101,69 @@ def runtime_env(profile, server):
     return env
 
 
+def ensure_server(root):
+    """Also support direct CLI/notebook imports without PYTHONPATH or symlinks."""
+    server = (Path(root) / "publication/server").resolve()
+    if not (server / "feiyu_runtime/__init__.py").is_file():
+        raise RuntimeError("缺少 publication/server/feiyu_runtime，请先完成 Notebook 的安装单元格。")
+    for path in (server, server / "scripts"):
+        value = str(path)
+        if value not in sys.path:
+            sys.path.insert(0, value)
+    importlib.invalidate_caches()
+    return server
+
+
+def select_cuda_build(requested="auto"):
+    """Match known wheels to kernel runtime, or to driver capability as fallback.
+
+    nvidia-smi's CUDA Version is a driver capability, not the installed toolkit.
+    Do not synthesize arbitrary wheel versions from nvcc or the driver string.
+    """
+    if requested != "auto":
+        if requested not in LOCK["cuda_builds"]:
+            raise ValueError("CUDA 选项必须是 auto、cu128 或 cu130。")
+        return requested, dict(selection_source="explicit", requested=requested)
+    try:
+        import torch
+        hint = torch.version.cuda
+    except ImportError:
+        hint = None
+    origin = "kernel_torch"
+    if not hint:
+        try:
+            report = subprocess.check_output(["nvidia-smi"], text=True)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise RuntimeError("无法检测 CUDA，请先选择 GPU 会话或明确选择 cu128/cu130。") from exc
+        match = re.search(r"CUDA Version:\s*(\d+\.\d+)", report)
+        hint = match.group(1) if match else None
+        origin = "driver_capability"
+    match = re.fullmatch(r"(\d+)\.(\d+)(?:\.\d+)?", str(hint))
+    if not match:
+        raise RuntimeError("CUDA 版本无法识别；请明确选择 cu128/cu130，并检查独立环境的 CUDA 诊断。")
+    version = tuple(map(int, match.groups()))
+    if version >= (13, 0):
+        build = "cu130"
+    elif version >= (12, 8):
+        build = "cu128"
+    else:
+        raise RuntimeError(f"检测到 CUDA {hint}，不在本 Notebook 的自动选择范围；请使用兼容 GPU 会话。")
+    return build, dict(selection_source=origin, detected_cuda=hint, requested="auto")
+
+
+def colab_preset(base, engine, build):
+    """Return a per-session copy; never edit the shared/local CUDA preset."""
+    if build not in LOCK["cuda_builds"]:
+        raise ValueError("Unsupported CUDA wheel build: " + build)
+    preset = json.loads(json.dumps(base))
+    selected = LOCK["cuda_builds"][build]
+    preset["torch_index"] = selected["torch_index"]
+    stack = preset["engines"][engine]
+    for name in ("torch", "torchaudio", "torchcodec"):
+        stack[name] = selected[name]
+    return preset
+
+
 def inference_requirements(engine, source, destination):
     text = Path(source).read_text(encoding="utf-8")
     if engine == "tts":
@@ -110,7 +174,7 @@ def inference_requirements(engine, source, destination):
     return Path(destination)
 
 
-def setup(engine, root):
+def setup(engine, root, cuda_build="auto"):
     """Restartable stages, with the existing installer pins/profile/diagnostics."""
     root = Path(root).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -121,6 +185,8 @@ def setup(engine, root):
     state.mkdir(exist_ok=True)
     ready = state / "ready.json"
     if not ready.exists():
+        selected_build, selection = select_cuda_build(cuda_build)
+        print("独立环境 CUDA wheel:", selected_build, selection)
         need_disk(root, 12 * GIB)  # environment build reserve, separate from model download
         # Only missing OS packages are installed; no apt upgrade or kernel pip upgrade.
         required = ["git", "ffmpeg", "libsndfile1", "libsox-dev", "libportaudio2", "build-essential"]
@@ -143,11 +209,11 @@ def setup(engine, root):
                  LOCK["python"], state / "venv"], env=tool_env)
         publication = root / "publication"
         clone_pinned(LOCK["source_repo"], LOCK["source_commit"], publication)
-        server = publication / "server"
-        sys.path.insert(0, str(server / "scripts"))
+        server = ensure_server(root)
         from setup_runtime import SOURCES, build_profile
-        preset = read(server / "runtime_profiles/cuda.json")
+        preset = colab_preset(read(server / "runtime_profiles/cuda.json"), engine, selected_build)
         stack = preset["engines"][engine]
+        write(state / "runtime_preset.json", dict(preset=preset, selection=selection, cuda_build=selected_build))
         source = state / "source"
         clone_pinned(*SOURCES[engine], source, submodules=(engine == "tts"))
         if engine == "rvc":
@@ -173,11 +239,14 @@ def setup(engine, root):
         with (state / "requirements-resolved.txt").open("w") as stream:
             run([python, "-m", "pip", "freeze"], stdout=stream)
         profile = build_profile(preset, stack, engine, python, source, "Google-Colab/Linux")
+        profile["cuda_build"] = selected_build
         write(state / "runtime.local.json", profile)
-        write(ready, {"lock_sha256": sha(HERE / "releases.json")})
+        write(ready, {"lock_sha256": sha(HERE / "releases.json"), "cuda_build": selected_build})
     elif read(ready)["lock_sha256"] != sha(HERE / "releases.json"):
-        raise RuntimeError("配置版本已经变化，请在新的 Colab 会话运行；保留现有结果。")
-    server = root / "publication/server"
+        raise RuntimeError("初始化配置已更新，请先下载已有结果，再在新的 Colab GPU 会话运行新版 Notebook；不删除原有文件。")
+    elif cuda_build != "auto" and read(ready).get("cuda_build") != cuda_build:
+        raise RuntimeError("已有独立环境使用另一 CUDA build。请保留结果并在新会话切换，或选 auto 复用。")
+    server = ensure_server(root)
     profile_path = state / "runtime.local.json"
     profile = read(profile_path)
     env = runtime_env(profile, server)
@@ -286,6 +355,7 @@ def convert(root, request):
     root = Path(root).resolve()
     profile = read(root / "rvc/runtime.local.json")
     package = root / "rvc/package"
+    ensure_server(root)
     from feiyu_runtime.common import prepare, verify_audio_library, verify_package, verify_repo
     manifest = verify_package(package)
     source = verify_repo(profile)
@@ -359,6 +429,7 @@ def infer_tts(root, request_path):
         raise ValueError("请选择 Cute/Gentle，并输入 1–2000 字符文本。")
     if any(importlib.util.find_spec(name) is not None for name in ("wetext", "ttsfrd")):
         raise RuntimeError("此 Notebook 固定使用原发布环境的内建文本处理。请使用新的独立环境，不安装额外 WeText/ttsfrd 资源。")
+    ensure_server(root)
     from feiyu_runtime.tts import main
     main(root / "tts/package", read(root / "tts/runtime.local.json"), ["--request", str(request_path)])
     audio_info(Path(request["output_dir"]) / "speech.wav", 24000)

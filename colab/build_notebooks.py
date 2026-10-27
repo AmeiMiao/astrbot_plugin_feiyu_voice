@@ -65,7 +65,9 @@ fv.check_gpu()
 ''', "intro"), cell("code", bootstrap, "bootstrap"),
         cell("code", f'''
 #@title 2 · 安装独立环境（可重复运行）
-fv.setup("{engine}", ROOT)
+cuda_build = "auto" #@param ["auto", "cu128", "cu130"]
+# auto 优先按 Colab kernel 的 PyTorch CUDA build 选择；没有该信息时参考驱动能力。
+fv.setup("{engine}", ROOT, cuda_build=cuda_build)
 ''', "setup"),
         cell("code", f'''
 #@title 3 · 下载并校验正式发布模型

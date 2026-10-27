@@ -2,6 +2,19 @@
 
 日期：2026-10-26。范围仅为现有正式模型推理，无训练、微调、权重修改、模型迁移或重新发布。
 
+## 2026-10-27：Colab 反馈修复
+
+用户反馈：Colab CUDA 13.0 环境手动调整 CUDA 配置并建立 `feiyu_runtime` symlink 后可使用。反馈未附完整环境/运行日志，不能据此把本次自动修复标记为完整云端 PASS。
+
+- 新增 `auto / cu128 / cu130` 安装表单。auto 优先看 kernel 的 PyTorch CUDA runtime，缺失时再看驱动 CUDA 能力；只选择 `releases.json` 中固定的官方 2.11.0 wheel。包索引、torch、torchaudio、constraints、生成 profile 和就绪标记同步，不修改共享/本机 `cuda.json`。
+- 安装和 RVC/TTS 推理入口显式加入 `publication/server` 路径，不依赖启动目录或外部 PYTHONPATH，不创建 symlink。子进程仍显式设置 PYTHONPATH。
+- 新增 CUDA 12.8/13.0 自动选择、驱动信息回退、显式选择、错误版本、共享预设保护、安装/profile 一致性、禁止覆盖已选环境，以及无 PYTHONPATH、无 symlink、不同工作目录下的实际 CLI 子进程导入回归。
+- 保留模型 revision、权重、索引、参考与推理算法。更新两个 Notebook 内的辅助文件 SHA；旧会话应先保存输出，再用新版 Notebook 与新 GPU 会话。
+
+2026-10-26 的下列音频证据属于 cu128；不能外推为 cu130 的音质、速度或最低显存验证。真实 Colab GPU 自动修复路径仍待验收。CUDA 13.0 也不意味着所有 cu128 构建必然不兼容；驱动与 wheel runtime 的含义已在 README 区分。
+
+本轮验证结果：18 项静态/回归测试全部通过；真实子进程覆盖 RVC 与 TTS 的模块导入（模型前主动停止的测试夹具）；PyTorch 官方源上 `torch==2.11.0+cu130`、`torchaudio==2.11.0+cu130` 的 CPython 3.11 Linux x86_64 wheel 均返回 HTTP 200，仅验证可获取性，未安装或运行 cu130。另从 `/tmp` 移除 PYTHONPATH、不建立 symlink，执行真实本地 cu128 RVC 推理成功：40 kHz、2.72 秒、WAV 有效，SHA-256 与上次同输入默认参数输出一致（`c83ddbbb8405a744f6a199e74e87a16e1242a310fddc7326abb28c80d1e9d4bb`）。完整新会话安装及 Colab GPU 自动修复验收仍为 NOT RUN。
+
 ## 实现与文件清单
 
 | 文件 | 作用 |

@@ -4,6 +4,20 @@
   "source_commit": "7baff58fdb4c4472a392be94da6dfa9690d96a8b",
   "python": "3.11.17",
   "uv": "0.13.5",
+  "cuda_builds": {
+    "cu128": {
+      "torch_index": "https://download.pytorch.org/whl/cu128",
+      "torch": "2.11.0+cu128",
+      "torchaudio": "2.11.0+cu128",
+      "torchcodec": "0.11.0+cpu"
+    },
+    "cu130": {
+      "torch_index": "https://download.pytorch.org/whl/cu130",
+      "torch": "2.11.0+cu130",
+      "torchaudio": "2.11.0+cu130",
+      "torchcodec": "0.11.0+cpu"
+    }
+  },
   "rvc": {
     "repo": "Esmerubphire/FeiyuVoice-RVC",
     "revision": "04e5011b72341a742ef17a718d5da0435343f893",

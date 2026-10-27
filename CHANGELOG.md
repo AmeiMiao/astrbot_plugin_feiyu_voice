@@ -2,6 +2,13 @@
 
 服务、AstrBot 插件和模型权重分别管理版本；服务端更新不会自动改变模型权重或已有插件安装包。
 
+## 2026-10-27 · Colab CUDA 选择与模块导入修复
+
+- 两份 Notebook 安装表单增加 `auto / cu128 / cu130`，按 Colab 内核的 CUDA runtime 选择固定的 PyTorch 2.11.0 构建，同步 wheel 源、依赖约束与 profile；不改写共享的本机 CUDA 预设。
+- 安装与推理入口自动定位 `publication/server/feiyu_runtime`，无需手动创建 symlink 或设置 PYTHONPATH。
+- 更新辅助脚本 SHA 与使用说明，18 项回归测试通过，真实本地 cu128 RVC CLI 输出与既有结果一致；用户反馈手工调整后 Colab 可用，自动修复版本的完整 Colab GPU 验收仍待完成。
+- 模型权重、参考音频、索引、推理算法及已有插件安装包保持不变。
+
 ## 2026-10-25 · 使用指南与素材署名
 
 - 将项目首页与面向 DeepSeek／DSH／AstrBot agent 的《小肥鱼的声音指南》分别组织，统一使用 🐋 标识。

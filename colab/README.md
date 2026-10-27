@@ -14,6 +14,12 @@
 3. RVC 上传干净人声并设置参数；TTS 选择 Cute / Gentle 并输入短句。
 4. 执行推理、试听，再运行下载单元格保存 WAV。
 
+安装单元格的 `cuda_build` 默认选 **auto**：优先根据 Colab kernel 的 `torch.version.cuda` 选择已固定的 `cu128`（12.8/12.9）或 `cu130`（13.0 及以上）；内核没有 CUDA build 信息时，才参考 `nvidia-smi` 显示的驱动 CUDA 能力。也可在表单明确选择 `cu128` / `cu130`。这不是直接把系统版本拼到 wheel 名称上，PyTorch 与 torchaudio 始终固定为 2.11.0，来源、constraints 和 profile 同步选择。实际 CUDA kernel 诊断仍必须通过。
+
+不需要手改 `server/runtime_profiles/cuda.json` 或创建 symlink。安装和推理入口会显式定位 `/content/feiyuvoice/publication/server` 并加入 Python 模块搜索路径；独立子进程也会设置该路径，与当前目录无关。本机/WSL 的共享 CUDA 预设不变。
+
+如果之前已经运行过旧版或手工修复过环境，请先下载已有结果，再重新打开新版 Notebook 并使用新的 GPU 会话。Notebook 与辅助文件 hash 必须匹配；成功初始化后 `auto` 复用已选环境，显式切换 build 会要求新会话，不直接覆盖已有环境。
+
 没有可用 NVIDIA GPU 时会提前停止。GPU 型号、显存、CUDA 状态在初始化时显示，随后检查独立环境实际 CUDA 运算。免费资源、具体 GPU 和会话寿命不保证；本项目未认证最低显存、T4、L4、A100 等每一种型号。首次 TTS 模型下载约 **6.94 GiB**，RVC 发布包约 **83 MiB**，此外还需 ContentVec / RMVPE、Python、PyTorch 与其他依赖；安装阶段预检 12 GiB 余量，模型下载阶段另按缺失文件体积加 2 GiB 预检，均是操作余量，不是严格峰值磁盘保证。使用后及时下载，运行时被回收后临时文件会丢失。
 
 ## RVC 的行为
@@ -51,7 +57,7 @@ Gentle 不是另一份微调模型。每次任务使用独立推理进程，按�
 | Applio | `67a38f6abab3e90a55efa534ea3185a222c102f0` ＋已发布且校验的 17 文件 overlay |
 | CosyVoice | `074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc`，递归初始化固定 submodule |
 | 独立 Python / uv | `3.11.17` / `0.13.5` |
-| torch / torchaudio | `2.11.0+cu128`（复用当前 CUDA 预设） |
+| torch / torchaudio | `2.11.0+cu128` 或 `2.11.0+cu130`，由 Colab 表单自动/明确选择 |
 | torchcodec | `0.11.0+cpu` |
 | HF Hub | RVC `1.16.1`；TTS `0.36.2`（与各自 Transformers 约束匹配） |
 | pip / setuptools / wheel | `25.2` / `79.0.1` / `0.48.0`，避免最新 setuptools 移除旧组件需要的接口 |
@@ -63,6 +69,8 @@ RVC 的 `v1` 标签早于最新署名文档；这里固定包含最新 COPYRIGHT
 Notebook 辅助文件从本仓 `main/colab/` 获取，并在执行前验证 Notebook 内固定的 SHA-256；上游推理代码另用不可变 commit。辅助文件更新后，必须运行 `python colab/build_notebooks.py` 同步 Notebook 内的 hash，并一起发布；不同版本混用会拒绝运行。维护更新时须同步发布 Notebook 和辅助文件，避免版本不匹配。
 
 独立环境放在 `/content/feiyuvoice/{rvc,tts}/venv`，不升级内核或系统全部依赖。只安装缺失的系统包。安装分阶段可重复，成功后重跑不会重装；每次仍校验实际 CUDA kernel、引擎导入和源文件。完整环境解析结果保存在 `requirements-resolved.txt`，关键直接依赖沿用已发布版本锁；传递依赖不是跨时间完全固定的 lock，需要实测。若上游包下架、驱动不兼容、GitHub/HF/PyPI/PyTorch 不可达，会明确失败，不降级为 CPU 或更换未经验证的模型。
+
+Colab 的每次选择另记录在 `runtime_preset.json`，实际安装版本写入 `runtime.local.json` 和 `ready.json`。不重写共享的 `cuda.json`。`nvidia-smi` 的 CUDA Version 表示驱动支持能力，不能直接当作已安装 toolkit 或 PyTorch runtime；新版驱动也能运行较旧 CUDA 构建。因此看到 13.0 并不代表所有 cu128 wheel 必然失效。这里优先匹配内核 runtime，且仅选择 [PyTorch 官方提供的 2.11.0 wheel 组合](https://pytorch.org/get-started/previous-versions/)；兼容性区别见 [NVIDIA 官方说明](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)。
 
 ## 授权与 Colab 政策
 
