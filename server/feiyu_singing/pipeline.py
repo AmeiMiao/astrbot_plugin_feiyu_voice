@@ -34,9 +34,18 @@ def resolve(value):
     return path.resolve() if path.is_absolute() else (ROOT / path).resolve()
 
 
+_native_host = False
+
+
+def set_native_host(runtime):
+    """Profiles with host=windows run natively on Windows; others keep the WSL path mapping."""
+    global _native_host
+    _native_host = os.name == "nt" and runtime.get("host") == "windows"
+
+
 def linux_path(path):
     path = Path(path).resolve()
-    if os.name != "nt":
+    if os.name != "nt" or _native_host:
         return str(path)
     value = path.as_posix()
     if len(value) < 3 or value[1:3] != ":/":
@@ -46,9 +55,10 @@ def linux_path(path):
 
 def runtime_command(runtime, script, *arguments):
     command = [runtime["python"], "-B", linux_path(script), *map(str, arguments)]
-    if runtime.get("python_library_dir"):
+    set_native_host(runtime)
+    if runtime.get("python_library_dir") and not _native_host:
         command[:0] = ["env", "LD_LIBRARY_PATH=" + runtime["python_library_dir"]]
-    if os.name == "nt":
+    if os.name == "nt" and not _native_host:
         command = ["wsl.exe", "-d", runtime["distribution"], "-e", *command]
     return command
 
@@ -145,6 +155,7 @@ def synthesize(score, *, lyrics=None, lyrics_file=None, pinyin_file=None, track=
         if cfg.get("svs_runtime_profile_sha256") and sha(profile_path) != cfg["svs_runtime_profile_sha256"]:
             raise ValueError("SVS runtime profile changed after submission")
         cfg["svs_runtime"] = validate_profile(load(profile_path))
+        set_native_host(cfg["svs_runtime"])
         if cfg["svs_runtime"]["engine"] != "svs":
             raise ValueError("SVS runtime profile engine mismatch")
     package = resolve(cfg["rvc_package"])

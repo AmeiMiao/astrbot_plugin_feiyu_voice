@@ -11,6 +11,7 @@ from feiyu_singing.pipeline import (
     run_logged,
     runtime_command,
     save,
+    set_native_host,
     sha,
     synthesize,
 )
@@ -24,6 +25,8 @@ def execute(job):
     backend, request, kind = job["backend"], job["request"], job["kind"]
     package = Path(backend["package"])
     managed = backend.get("adapter") == "managed"
+    if managed:
+        set_native_host(backend["runtime"])
     runtime_path = Path(backend.get("runtime_path", package / "runtime.local.json"))
     if (
         sha(package / "manifest.json") != backend["manifest_sha256"]
@@ -68,8 +71,8 @@ def execute(job):
             ),
         )
         # Some standalone Python builds require an explicit library search path.
-        rt = dict(distribution=runtime["distribution"], python=runtime["python"],
-                  python_library_dir=runtime.get("python_library_dir"))
+        rt = dict(distribution=runtime.get("distribution"), python=runtime["python"],
+                  python_library_dir=runtime.get("python_library_dir"), host=runtime.get("host"))
         command = runtime_command(rt, script, *prefix, "--request", linux_path(task))
         run_logged(command, folder / "inference.log")
         receipt = load(folder / "output/result.json")
@@ -85,11 +88,12 @@ def execute(job):
     elif kind == "conversion":
         runtime = backend["runtime"]
         rt = dict(
-            distribution=runtime["distribution"] if managed else runtime["wsl_distribution"],
+            distribution=runtime.get("distribution") if managed else runtime["wsl_distribution"],
             python=runtime["python"] if managed else runtime["wsl_python"]
         )
         if managed:
             rt["python_library_dir"] = runtime.get("python_library_dir")
+            rt["host"] = runtime.get("host")
         command = runtime_command(
             rt,
             script,
@@ -133,7 +137,7 @@ def execute(job):
             backend["package_id"],
         )
         config["rvc_runtime"] = dict(
-            distribution=backend["runtime"]["distribution"] if managed else backend["runtime"]["wsl_distribution"],
+            distribution=backend["runtime"].get("distribution") if managed else backend["runtime"]["wsl_distribution"],
             python=backend["runtime"]["python"] if managed else backend["runtime"]["wsl_python"],
         )
         if managed:

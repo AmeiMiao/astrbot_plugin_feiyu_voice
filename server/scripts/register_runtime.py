@@ -10,7 +10,7 @@ from setup_runtime import ROOT, SOURCES, build_profile, run, save
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--backend", required=True, choices=("cuda", "rocm"))
+    parser.add_argument("--backend", required=True, choices=("cuda", "rocm", "xpu"))
     parser.add_argument("--engine", required=True, choices=tuple(SOURCES))
     parser.add_argument("--repo", required=True, type=Path)
     parser.add_argument("--python", required=True, type=Path)

@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -42,8 +43,10 @@ def verify_package(package):
 def validate_profile(profile):
     if profile.get("schema") != "feiyu-runtime-v1":
         raise ValueError("Unsupported runtime profile schema")
-    if profile.get("backend") not in ("cuda", "hip", "cpu"):
-        raise ValueError("Runtime backend must be cuda, hip or cpu")
+    if profile.get("backend") not in ("cuda", "hip", "xpu", "cpu"):
+        raise ValueError("Runtime backend must be cuda, hip, xpu or cpu")
+    if profile.get("host", "wsl") not in ("wsl", "windows"):
+        raise ValueError("Runtime host must be wsl or windows")
     if profile.get("engine") not in ("rvc", "tts", "svs"):
         raise ValueError("Runtime engine must be rvc, tts or svs")
     for key in ("python", "repo", "commit", "torch_version", "torchaudio_version"):
@@ -53,6 +56,8 @@ def validate_profile(profile):
         raise ValueError("Runtime needs the source manifest produced by setup_runtime.py")
     if profile.get("precision") not in ("float32", "float16"):
         raise ValueError("Unsupported runtime precision")
+    if profile["backend"] == "xpu" and profile["precision"] != "float32":
+        raise ValueError("XPU profiles run FP32 inference")
     if profile["engine"] in ("tts", "rvc") and profile["precision"] != "float32":
         raise ValueError("TTS/RVC release adapters preserve FP32 inference")
     if profile.get("f0_device", "cpu") not in ("cpu", "model"):
@@ -79,7 +84,31 @@ def backend_name(torch):
         return "hip"
     if getattr(torch.version, "cuda", None):
         return "cuda"
+    if getattr(torch.version, "xpu", None):
+        return "xpu"
     return "cpu"
+
+
+def apply_backend_env(profile):
+    """Set backend environment before torch is imported (it is read at library load)."""
+    if profile.get("backend") == "xpu":
+        # Unsupported XPU ops run on the CPU instead of aborting a whole job.
+        os.environ.setdefault("PYTORCH_ENABLE_XPU_FALLBACK", "1")
+
+
+def accelerator(torch, backend):
+    """The torch namespace holding device APIs: torch.xpu for Intel, torch.cuda for CUDA and HIP."""
+    return torch.xpu if backend == "xpu" else torch.cuda
+
+
+def device_type(backend):
+    return {"cpu": "cpu", "xpu": "xpu"}.get(backend, "cuda")
+
+
+def seed_all(torch, backend, seed):
+    torch.manual_seed(seed)
+    if backend != "cpu":
+        accelerator(torch, backend).manual_seed_all(seed)
 
 
 def prepare(torch, profile):
@@ -89,9 +118,9 @@ def prepare(torch, profile):
         raise ValueError("PyTorch version differs from runtime profile")
     requested = profile["backend"]
     built = backend_name(torch)
-    if requested != "cpu" and (built != requested or not torch.cuda.is_available()):
+    if requested != "cpu" and (built != requested or not accelerator(torch, requested).is_available()):
         raise RuntimeError(f"Requested {requested} GPU is unavailable (PyTorch build: {built}); no automatic CPU substitution")
-    device = "cpu" if requested == "cpu" else "cuda:0"
+    device = "cpu" if requested == "cpu" else device_type(requested) + ":0"
     if requested == "hip":
         torch.backends.cuda.enable_flash_sdp(False)
         torch.backends.cuda.enable_mem_efficient_sdp(False)
@@ -99,7 +128,9 @@ def prepare(torch, profile):
     torch.set_num_threads(4)
     return dict(backend=requested, device=device, torch=str(torch.__version__),
                 hip=getattr(torch.version, "hip", None), cuda=getattr(torch.version, "cuda", None),
-                precision=profile["precision"], gpu=None if device == "cpu" else torch.cuda.get_device_name(0),
+                xpu=getattr(torch.version, "xpu", None),
+                precision=profile["precision"],
+                gpu=None if device == "cpu" else accelerator(torch, requested).get_device_name(0),
                 validation="actual_worker_runtime; not a hardware certification")
 
 
@@ -107,6 +138,25 @@ def verify_audio_library(profile):
     import torchaudio
     if str(torchaudio.__version__) != profile["torchaudio_version"]:
         raise ValueError("torchaudio version differs from runtime profile")
+    if profile.get("host") == "windows":
+        use_soundfile_loader(torchaudio)
+
+
+def use_soundfile_loader(torchaudio):
+    """torchaudio >= 2.9 decodes through torchcodec, which needs shared FFmpeg DLLs that
+    a plain Windows install does not have. Reference audio is WAV, so read it with
+    soundfile, which is what the upstream `backend='soundfile'` argument asked for."""
+    import soundfile
+    import torch
+
+    def load(uri, frame_offset=0, num_frames=-1, normalize=True, channels_first=True, format=None,
+             buffer_size=4096, backend=None):
+        if not normalize:
+            raise ValueError("The soundfile loader only returns normalized float32 audio")
+        data, rate = soundfile.read(str(uri), start=frame_offset, frames=num_frames, dtype="float32", always_2d=True)
+        return torch.from_numpy(data.T.copy() if channels_first else data), rate
+
+    torchaudio.load = load
 
 
 @contextmanager

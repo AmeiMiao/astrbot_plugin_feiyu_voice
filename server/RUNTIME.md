@@ -1,8 +1,8 @@
 # GPU runtime setup
 
-For new installations, follow [INSTALL_AGENT.md](INSTALL_AGENT.md). It explains GPU detection, choosing CUDA or WSL ROCm, isolated per-engine environments, model downloads, generated profiles, and actual HTTP/audio acceptance. AMD profiles are experimental and have not been tested on physical AMD hardware.
+For new installations, follow [INSTALL_AGENT.md](INSTALL_AGENT.md). It explains GPU detection, choosing CUDA, WSL ROCm or native-Windows Intel XPU, isolated per-engine environments, model downloads, generated profiles, and actual HTTP/audio acceptance. AMD profiles are experimental and have not been tested on physical AMD hardware.
 
-`runtime_profiles/cuda.json` and `runtime_profiles/rocm.json` pin the selected torch/torchaudio builds. `scripts/setup_runtime.py` installs a new environment; `scripts/register_runtime.py` validates and registers an existing compatible one. Neither changes model weights. A service entry's optional `runtime_profile` selects the new adapter; omission preserves the legacy package-local runner.
+`runtime_profiles/cuda.json`, `runtime_profiles/rocm.json` and `runtime_profiles/xpu.json` pin the selected torch/torchaudio builds. `scripts/setup_runtime.py` installs a new environment; `scripts/register_runtime.py` validates and registers an existing compatible one. Neither changes model weights. A service entry's optional `runtime_profile` selects the new adapter; omission preserves the legacy package-local runner.
 
 RVC uses the pinned Applio source plus `runtime_compat/Applio/` and the SHA-verified upstream ContentVec/RMVPE assets listed in `runtime_compat/upstream_assets.json`. TTS keeps the model checkpoint/reference selection, uses standard PyTorch inference and explicitly selects CPU ONNX sessions. SVS uses the fixed SoulX-Singer commit and configurable precision. Training and optional CUDA-only acceleration dependencies are excluded from the inference requirements.
 

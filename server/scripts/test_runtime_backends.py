@@ -10,8 +10,9 @@ from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from feiyu_runtime.common import (backend_name, cpu_onnx_sessions, load, prepare, save,
-                                 sha, validate_profile, verify_package)
+from feiyu_runtime.common import (apply_backend_env, backend_name, cpu_onnx_sessions, device_type, load,
+                                 prepare, save, seed_all, sha, validate_profile, verify_package)
+from feiyu_singing import pipeline
 from feiyu_voice_service.registry import Registry
 from feiyu_voice_service.worker import execute
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -27,10 +28,16 @@ def profile(engine="tts", backend="hip"):
 
 
 def torch_stub(backend="hip", available=True):
+    # Only the build matching `backend` has its accelerator namespace usable.
+    def accelerator(name):
+        return SimpleNamespace(is_available=lambda: available and backend == name,
+                               get_device_name=lambda n: "test GPU", manual_seed_all=Mock())
     return SimpleNamespace(__version__="test-version",
         version=SimpleNamespace(hip="7.2" if backend == "hip" else None,
-                                cuda="12.8" if backend == "cuda" else None),
-        cuda=SimpleNamespace(is_available=lambda: available, get_device_name=lambda n: "test GPU"),
+                                cuda="12.8" if backend == "cuda" else None,
+                                xpu="20260100" if backend == "xpu" else None),
+        cuda=accelerator("hip" if backend == "hip" else "cuda"), xpu=accelerator("xpu"),
+        manual_seed=Mock(),
         backends=SimpleNamespace(cuda=SimpleNamespace(enable_flash_sdp=Mock(),
             enable_mem_efficient_sdp=Mock(), enable_math_sdp=Mock())), set_num_threads=Mock())
 
@@ -63,6 +70,64 @@ class RuntimeTests(unittest.TestCase):
         result = prepare(torch_stub(), profile())
         self.assertEqual(result["backend"], "hip")
         self.assertEqual(result["device"], "cuda:0")
+
+    def test_xpu_preset_is_fp32_and_installs_only_xpu_wheels(self):
+        preset = load(ROOT / "runtime_profiles/xpu.json")
+        self.assertEqual(preset["backend"], "xpu")
+        self.assertTrue(preset["torch_index"].endswith("/xpu"))
+        for stack in preset["engines"].values():
+            self.assertTrue(stack["torch"].endswith("+xpu"))
+            self.assertEqual(stack["precision"], "float32")
+
+    def test_xpu_uses_xpu_device_and_leaves_cuda_sdp_alone(self):
+        torch = torch_stub("xpu")
+        result = prepare(torch, profile(backend="xpu"))
+        self.assertEqual((result["backend"], result["device"], result["gpu"]), ("xpu", "xpu:0", "test GPU"))
+        self.assertEqual(result["xpu"], "20260100")
+        torch.backends.cuda.enable_flash_sdp.assert_not_called()
+
+    def test_xpu_profile_refuses_other_wheels_and_fp16(self):
+        for torch in (torch_stub("cuda"), torch_stub("hip"), torch_stub("xpu", False)):
+            with self.assertRaises(RuntimeError):
+                prepare(torch, profile(backend="xpu"))
+        with self.assertRaises(RuntimeError):
+            prepare(torch_stub("xpu"), profile(backend="cuda"))
+        p = profile("svs", "xpu")
+        p["precision"] = "float16"
+        with self.assertRaises(ValueError):
+            validate_profile(p)
+
+    def test_backend_helpers(self):
+        self.assertEqual([backend_name(torch_stub(b)) for b in ("hip", "cuda", "xpu")], ["hip", "cuda", "xpu"])
+        self.assertEqual([device_type(b) for b in ("cpu", "cuda", "hip", "xpu")], ["cpu", "cuda", "cuda", "xpu"])
+        torch = torch_stub("xpu")
+        seed_all(torch, "xpu", 7)
+        torch.manual_seed.assert_called_once_with(7)
+        torch.xpu.manual_seed_all.assert_called_once_with(7)
+        torch.cuda.manual_seed_all.assert_not_called()
+
+    def test_xpu_enables_cpu_fallback_for_unsupported_ops(self):
+        with patch.dict("os.environ", {}, clear=False):
+            sys.modules["os"].environ.pop("PYTORCH_ENABLE_XPU_FALLBACK", None)
+            apply_backend_env(profile(backend="cuda"))
+            self.assertNotIn("PYTORCH_ENABLE_XPU_FALLBACK", sys.modules["os"].environ)
+            apply_backend_env(profile(backend="xpu"))
+            self.assertEqual(sys.modules["os"].environ["PYTORCH_ENABLE_XPU_FALLBACK"], "1")
+
+    def test_native_windows_host_skips_wsl_wrapping_and_path_mapping(self):
+        native = dict(profile(backend="xpu"), host="windows", python="C:/env/python.exe")
+        with patch.object(pipeline.os, "name", "nt"):
+            command = pipeline.runtime_command(native, ROOT / "feiyu_runtime/worker.py", "--kind", "tts")
+            self.assertEqual(command[0], "C:/env/python.exe")
+            self.assertNotIn("wsl.exe", command)
+            self.assertEqual(pipeline.linux_path(ROOT), str(ROOT.resolve()))
+            wsl = pipeline.runtime_command(profile(), ROOT / "feiyu_runtime/worker.py")
+            self.assertEqual(wsl[:3], ["wsl.exe", "-d", "Ubuntu-24.04"])
+            self.assertTrue(pipeline.linux_path(ROOT).startswith("/mnt/"))
+
+    def test_unknown_host_rejected(self):
+        with self.assertRaises(ValueError):
+            validate_profile(dict(profile(backend="xpu"), host="macos"))
 
     def test_wrong_wheel_and_missing_gpu_fail(self):
         for torch in (torch_stub("cuda"), torch_stub("hip", False)):

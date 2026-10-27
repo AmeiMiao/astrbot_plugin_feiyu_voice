@@ -6,11 +6,12 @@ import sys
 import traceback
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from feiyu_runtime.common import load, prepare, save, verify_audio_library, verify_repo
+from feiyu_runtime.common import accelerator, apply_backend_env, load, prepare, save, verify_audio_library, verify_repo
 
 
 def diagnose(profile):
     repo = verify_repo(profile)
+    apply_backend_env(profile)
     os.chdir(repo)
     sys.path[:0] = [str(repo), str(repo / "third_party/Matcha-TTS")]
     import torch
@@ -25,7 +26,7 @@ def diagnose(profile):
         if not all(bool(torch.isfinite(x).all()) for x in (b, c, f)):
             raise ValueError("Non-finite backend kernel result")
         if device != "cpu":
-            torch.cuda.synchronize()
+            accelerator(torch, info["backend"]).synchronize()
     if profile["engine"] == "rvc":
         from rvc.infer.infer import VoiceConverter
         from rvc.lib.predictors.f0 import RMVPE

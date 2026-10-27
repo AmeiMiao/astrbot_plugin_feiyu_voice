@@ -1,1 +1,2 @@
 server/runtime_compat/Applio/** -text whitespace=cr-at-eol
+server/assets/singing/phone_set.json -text

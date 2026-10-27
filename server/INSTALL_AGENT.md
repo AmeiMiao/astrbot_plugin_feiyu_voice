@@ -167,7 +167,8 @@ wsl -d Ubuntu-24.04 -- uname -a
 |---|---|
 | 有可用 NVIDIA 独显 | `cuda`，先在 WSL 确认 `nvidia-smi` 可用 |
 | 只有 AMD，且该型号/驱动/WSL 组合在 AMD 官方支持范围内 | `rocm`，装对应 Windows WSL 驱动和 ROCm 运行时 |
-| 混合显卡 | 默认用已可用的 NVIDIA；用户要求 AMD 时明确选择 ROCm |
+| 只有 Intel Arc / Core Ultra 核显，且 `torch.xpu` 能看到该 GPU | `xpu`，**在 Windows 原生运行**（不经过 WSL），见下方 “Intel XPU” |
+| 混合显卡 | 默认用已可用的 NVIDIA；用户要求 AMD 或 Intel 时明确选择对应后端 |
 | AMD 未列入支持组合、型号未知或 GPU 在 WSL 不可见 | 说明缺少哪项兼容条件；不能宣称 GPU 服务已装好 |
 
 ROCm 采用 PyTorch 的 `cuda:0` 设备名，实际后端用 `torch.version.hip` 判别。不要把代码中的所有 `cuda` 替换成 `hip`，不要在同一个虚拟环境混装两个后端。参考 [AMD 当前兼容矩阵](https://rocm.docs.amd.com/en/latest/compatibility/compatibility-matrix.html) 和 [PyTorch HIP 说明](https://docs.pytorch.org/docs/main/notes/hip.html)。
@@ -178,10 +179,33 @@ ROCm 采用 PyTorch 的 `cuda:0` 设备名，实际后端用 `torch.version.hip`
 |---|---|---|---|
 | `runtime_profiles/cuda.json` | torch/torchaudio 2.11.0+cu128 | 2.8.0+cu128 | RVC/TTS FP32，SVS FP16，ONNX CPU |
 | `runtime_profiles/rocm.json` | torch/torchaudio 2.11.0+rocm7.2 | 2.11.0+rocm7.2 | FP32，RMVPE CPU，ONNX CPU |
+| `runtime_profiles/xpu.json` | torch/torchaudio 2.11.0+xpu | 2.11.0+xpu | FP32，RMVPE CPU，ONNX CPU |
 
 ROCm 预设的 wheel 来自 PyTorch 官方 `rocm7.2` 索引；wheel 存在不等于每张 Radeon 都获支持。先核对目标硬件与所选版本的官方条件。需要另一 ROCm 版本时新增独立预设、明确版本并重新验证，不静默改动这些预设。AMD FP32 SVS 显存和速度尚无实测，显存不足时先缩短分段，任何 FP16 调整都应记录条件。
 
+### Intel XPU（Arc / Core Ultra 核显，Windows 原生）
+
+Intel GPU 目前在 WSL2 里通常不可用，PyTorch 官方 XPU wheel 提供原生 Windows 版本，所以 `xpu` 预设直接在 Windows 上安装和运行，`runtime.local.json` 里 `host` 为 `windows`，服务端会直接启动该 Python，不再包一层 `wsl.exe`，路径也不做 `/mnt/` 转换。前置条件：最新 Intel 显卡驱动、`git`、`ffmpeg`、[`uv`](https://docs.astral.sh/uv/)（用它提供 Python 3.11）。先确认 GPU 可见：
+
+```powershell
+uv venv probe --python 3.11
+uv pip install --python probe\Scripts\python.exe --index-url https://download.pytorch.org/whl/xpu torch==2.11.0+xpu
+probe\Scripts\python.exe -c "import torch; print(torch.xpu.is_available(), torch.xpu.get_device_name(0))"
+```
+
+输出 `True` 和显卡名才继续。然后在 Windows PowerShell 中、仓库 `server/` 目录里为每个引擎各装一个环境：
+
+```powershell
+python scripts/setup_runtime.py --backend xpu --engine tts --destination C:\feiyu\xpu\tts
+python scripts/setup_runtime.py --backend xpu --engine rvc --destination C:\feiyu\xpu\rvc
+python scripts/setup_runtime.py --backend xpu --engine svs --destination C:\feiyu\xpu\svs   # 可选，按谱唱歌
+```
+
+适配方式：XPU 不被上游 CosyVoice / Applio 识别，所以 TTS 先在 CPU 加载，再把 llm / flow / hift 与输入张量所用的设备移到 `xpu:0`；RVC 在 Applio 的 `Config` 中显式设置 `xpu:0`；SVS 使用 FP32（上游 FP16 autocast 只支持 CUDA）。适配器启动前设置 `PYTORCH_ENABLE_XPU_FALLBACK=1`，个别 XPU 暂不支持的算子会回退到 CPU，而不是让任务失败。核显与系统共享内存，速度明显低于独立显卡，请以实测为准（见 [VALIDATION.json](VALIDATION.json)）。
+
 ## 2. 安装独立推理环境
+
+> 下面的命令针对 WSL（CUDA / ROCm）。Intel XPU 请用上一节的 Windows 命令。
 
 在 WSL Ubuntu 安装基础组件（Ubuntu 镜像中包名可能略有差异）：
 

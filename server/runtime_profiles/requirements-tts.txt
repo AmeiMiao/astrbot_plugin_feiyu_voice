@@ -15,6 +15,7 @@ omegaconf==2.3.0
 onnx==1.16.0
 onnxruntime==1.22.0
 openai-whisper==20250625
+pyarrow==18.1.0
 pyworld==0.3.4
 rich==13.7.1
 soundfile==0.12.1
