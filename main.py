@@ -28,7 +28,6 @@ class FeiyuVoice(Star):
             else {}
         )
         self.tasks = set()
-        self._silent = set()
 
     async def initialize(self):
         for job_id, row in self.jobs.items():
@@ -95,9 +94,7 @@ class FeiyuVoice(Star):
         dup = cache.get(sig)
         if dup:
             if quiet:
-                self._silent.add(id(event))
-                if len(self._silent) > 64:
-                    self._silent.clear()
+                event._feiyu_quiet = True
             return (
                 f"音频已经发出（任务 {dup[0]}），不用重发，也不用再确认。"
                 "回一个字「好」收尾就可以。"
@@ -110,9 +107,7 @@ class FeiyuVoice(Star):
         self.persist()
         self.watch(row["id"], origin)
         if quiet:
-            self._silent.add(id(event))
-            if len(self._silent) > 64:
-                self._silent.clear()
+            event._feiyu_quiet = True
         return (
             f"✅ 音频已发出（任务 {row['id']}）。这件事办完了，"
             "回一个字「好」收尾就可以，不要再调用任何工具。"
@@ -266,9 +261,9 @@ class FeiyuVoice(Star):
 
     @filter.on_decorating_result()
     async def hide_caption(self, event: AstrMessageEvent):
-        if id(event) not in self._silent:
+        if not getattr(event, "_feiyu_quiet", False):
             return
-        self._silent.discard(id(event))
+        event._feiyu_quiet = False
         chain = getattr(event.get_result(), "chain", None)
         if chain:
             chain.clear()
