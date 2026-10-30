@@ -109,23 +109,44 @@ class FeiyuVoice(Star):
             return False
         return bool(row.get("pending") or row.get("delivered"))
 
+    def _prune(self, turn, now):
+        """回收陈旧记录，但放过当前轮次和在途任务。
+
+        只按时间清理会误伤：生成超过 _DEDUPE_WINDOW 时，同一轮再调一次
+        就被当成新请求重新下单。所以这里先看轮次，再看那一单还在不在路上。
+        """
+        cache = self.__dict__.setdefault("_recent", {})
+        for key, item in list(cache.items()):
+            if now - item["at"] <= _DEDUPE_WINDOW:
+                continue
+            if item["turn"] == turn:
+                # 这一轮还没走完，状态留着；等跨轮了才轮到它过期
+                continue
+            if item["job"] is None:
+                # 占位由 submit 的异常分支负责回收，这里不动
+                continue
+            if (self.jobs.get(item["job"]) or {}).get("pending"):
+                # 还在生成，清掉就等于放行重复下单
+                continue
+            cache.pop(key, None)
+
     async def enqueue(self, event, kind, payload, quiet=False, caption=None):
         if not self.config.get("api_key"):
             raise ValueError("请先在插件配置中填写声音服务 API Key。")
         payload["voice"] = self.config.get("voice", "feiyu")
         origin = event.unified_msg_origin
+        turn = _turn_key(event)
         cache = self.__dict__.setdefault("_recent", {})
         sig = json.dumps(
-            [_turn_key(event), origin, kind, payload],
+            [turn, origin, kind, payload],
             sort_keys=True,
             ensure_ascii=False,
         )
         now = time.monotonic()
-        for stale in [k for k, v in cache.items() if now - v[1] > _DEDUPE_WINDOW]:
-            cache.pop(stale, None)
+        self._prune(turn, now)
         dup = cache.get(sig)
         if dup:
-            job_id = dup[0]
+            job_id = dup["job"]
             if job_id is None:
                 # 第一单还在提交，第二次调用撞在占位上
                 if quiet:
@@ -141,7 +162,7 @@ class FeiyuVoice(Star):
             # 上一单失败或没投递出去：不构成重复，清掉记录重新提交
             cache.pop(sig, None)
         # 先占位再 await：检查与占位之间没有 await，并发的第二次调用只能看到占位
-        reserved = (None, now)
+        reserved = {"job": None, "at": now, "turn": turn}
         cache[sig] = reserved
         try:
             row = await self.client.submit(kind, payload)
@@ -150,7 +171,7 @@ class FeiyuVoice(Star):
             if cache.get(sig) is reserved:
                 cache.pop(sig, None)
             raise
-        cache[sig] = (row["id"], time.monotonic())
+        cache[sig] = {"job": row["id"], "at": time.monotonic(), "turn": turn}
         self.jobs[row["id"]] = dict(origin=origin, pending=True, caption=caption)
         self.persist()
         self.watch(row["id"], origin)
