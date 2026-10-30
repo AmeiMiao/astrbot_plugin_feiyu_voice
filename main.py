@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from pathlib import Path
 
 import astrbot.api.message_components as Comp
@@ -9,6 +10,11 @@ from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.star.filter.command import GreedyStr
 
 from .client import VoiceClient
+
+
+# 同一会话、同一类型、同一参数在该窗口内只提交一单。
+# 大模型可能在一轮里重复调用同一个工具，重复提交会合成并发送多份音频。
+_DEDUPE_WINDOW = 20.0
 
 
 @register("feiyu_voice", "kaiyuey03", "肥鱼说话、换声与按谱唱歌统一接口", "0.1.0")
@@ -27,6 +33,7 @@ class FeiyuVoice(Star):
             else {}
         )
         self.tasks = set()
+        self._recent = {}
 
     async def initialize(self):
         for job_id, row in self.jobs.items():
@@ -49,14 +56,27 @@ class FeiyuVoice(Star):
         try:
             await self.client.wait(job_id)
             audio = await self.client.download(job_id, self.directory)
-            chain = MessageChain(
-                [Comp.Plain("肥鱼音频已生成。"), Comp.Record.fromFileSystem(str(audio))]
-            )
+            record = Comp.Record.fromFileSystem(str(audio))
+            caption = (self.jobs.get(job_id) or {}).get("caption")
+            if caption and self.config.get("caption_enable", True):
+                # 语音条单独发；文字等音频发送成功后再补，顺序因此是结构性的。
+                chain = MessageChain([record])
+            else:
+                caption = None
+                chain = MessageChain([Comp.Plain("肥鱼音频已生成。"), record])
             sent = await self.context.send_message(origin, chain)
             if not sent:
                 raise RuntimeError(
                     "The platform could not deliver the audio; retrieve it using the job command"
                 )
+            if caption:
+                try:
+                    await self.context.send_message(
+                        origin, MessageChain([Comp.Plain(caption)])
+                    )
+                except Exception:
+                    # 回执失败不影响音频已交付的事实，不要把任务标记成失败。
+                    logger.exception("Feiyu caption could not be delivered")
             self.jobs[job_id]["pending"] = False
             self.jobs[job_id]["delivered"] = True
             self.persist()
@@ -74,13 +94,30 @@ class FeiyuVoice(Star):
             except Exception:
                 logger.exception("Feiyu failure notification could not be delivered")
 
-    async def enqueue(self, event, kind, payload):
+    async def enqueue(self, event, kind, payload, caption=None):
         if not self.config.get("api_key"):
             raise ValueError("请先在插件配置中填写声音服务 API Key。")
         payload["voice"] = self.config.get("voice", "feiyu")
-        row = await self.client.submit(kind, payload)
         origin = event.unified_msg_origin
-        self.jobs[row["id"]] = dict(origin=origin, pending=True)
+        signature = json.dumps(
+            [origin, kind, payload], sort_keys=True, ensure_ascii=False
+        )
+        now = time.monotonic()
+        for stale in [
+            key
+            for key, (_, stamp) in self._recent.items()
+            if now - stamp > _DEDUPE_WINDOW
+        ]:
+            self._recent.pop(stale, None)
+        previous = self._recent.get(signature)
+        if previous:
+            return (
+                f"同一段语音已经提交过（任务 {previous[0]}），音频会照常发出，"
+                "不需要重复调用。"
+            )
+        row = await self.client.submit(kind, payload)
+        self._recent[signature] = (row["id"], now)
+        self.jobs[row["id"]] = dict(origin=origin, pending=True, caption=caption)
         self.persist()
         self.watch(row["id"], origin)
         return f"已提交肥鱼任务 {row['id']}，生成后会在本会话发送音频。"
@@ -168,16 +205,26 @@ class FeiyuVoice(Star):
 
     @filter.llm_tool(name="feiyu_speak")
     async def speak_tool(
-        self, event: AstrMessageEvent, text: str, style: str = "cute"
+        self,
+        event: AstrMessageEvent,
+        text: str,
+        style: str = "cute",
+        caption: str = "",
     ) -> str:
-        """用肥鱼声音朗读或说话。需要演唱谱子时使用 feiyu_sing；已有音频换声使用 feiyu_convert。
+        """用肥鱼声音朗读或说话。需要演唱谱子时使用 feiyu_sing；已有音频换声使用 feiyu_convert。一次调用就完成，不要重复调用。
 
         Args:
-            text(string): 要说的文字，最多2000字。
+            text(string): 要念出来的原文，最多2000字。
             style(string): cute 或 gentle。
+            caption(string): 语音条后面紧跟的一句话，20字以内、口语化；不想补话就留空。
         """
         try:
-            return await self.enqueue(event, "speech", dict(text=text, style=style))
+            return await self.enqueue(
+                event,
+                "speech",
+                dict(text=text, style=style),
+                caption=(caption or "").strip()[:60] or None,
+            )
         except Exception as exc:
             return str(exc)
 
