@@ -19,9 +19,6 @@ from .client import VoiceClient
 _DEDUPE_WINDOW = 20.0
 
 
-_ACK = {"speech": "好，说了。",
-        "conversion": "好，换好了。",
-        "singing": "好，唱了。"}
 
 
 def _turn_key(event):
@@ -165,7 +162,7 @@ class FeiyuVoice(Star):
                 "回一个字「好」收尾就可以，不要再调用任何工具。"
             )
         # command path: the return value is sent to the user verbatim
-        return _ACK.get(kind, "好。")
+        return f"✅ 音频已发出（任务 {row['id']}）"
 
     async def attached_asset(self, event, suffixes):
         components = list(event.get_messages())
