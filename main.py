@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from pathlib import Path
 
 import astrbot.api.message_components as Comp
@@ -27,6 +28,7 @@ class FeiyuVoice(Star):
             else {}
         )
         self.tasks = set()
+        self._silent = set()
 
     async def initialize(self):
         for job_id, row in self.jobs.items():
@@ -49,14 +51,20 @@ class FeiyuVoice(Star):
         try:
             await self.client.wait(job_id)
             audio = await self.client.download(job_id, self.directory)
-            chain = MessageChain(
-                [Comp.Plain("肥鱼音频已生成。"), Comp.Record.fromFileSystem(str(audio))]
-            )
+            chain = MessageChain([Comp.Record.fromFileSystem(str(audio))])
             sent = await self.context.send_message(origin, chain)
             if not sent:
                 raise RuntimeError(
                     "The platform could not deliver the audio; retrieve it using the job command"
                 )
+            caption = (self.jobs.get(job_id) or {}).get("caption")
+            if caption and self.config.get("caption_enable", True):
+                try:
+                    await self.context.send_message(
+                        origin, MessageChain([Comp.Plain(caption)])
+                    )
+                except Exception:
+                    logger.exception("Feiyu caption could not be delivered")
             self.jobs[job_id]["pending"] = False
             self.jobs[job_id]["delivered"] = True
             self.persist()
@@ -74,16 +82,41 @@ class FeiyuVoice(Star):
             except Exception:
                 logger.exception("Feiyu failure notification could not be delivered")
 
-    async def enqueue(self, event, kind, payload):
+    async def enqueue(self, event, kind, payload, quiet=False, caption=None):
         if not self.config.get("api_key"):
             raise ValueError("请先在插件配置中填写声音服务 API Key。")
         payload["voice"] = self.config.get("voice", "feiyu")
-        row = await self.client.submit(kind, payload)
         origin = event.unified_msg_origin
-        self.jobs[row["id"]] = dict(origin=origin, pending=True)
+        sig = json.dumps([origin, kind, payload], sort_keys=True, ensure_ascii=False)
+        cache = self.__dict__.setdefault("_recent", {})
+        now = time.monotonic()
+        for stale in [k for k, v in cache.items() if now - v[1] > 20]:
+            cache.pop(stale, None)
+        dup = cache.get(sig)
+        if dup:
+            if quiet:
+                self._silent.add(id(event))
+                if len(self._silent) > 64:
+                    self._silent.clear()
+            return (
+                f"音频已经发出（任务 {dup[0]}），不用重发，也不用再确认。"
+                "回一个字「好」收尾就可以。"
+            )
+        row = await self.client.submit(kind, payload)
+        cache[sig] = (row["id"], now)
+        self.jobs[row["id"]] = dict(
+            origin=origin, pending=True, caption=caption
+        )
         self.persist()
         self.watch(row["id"], origin)
-        return f"已提交肥鱼任务 {row['id']}，生成后会在本会话发送音频。"
+        if quiet:
+            self._silent.add(id(event))
+            if len(self._silent) > 64:
+                self._silent.clear()
+        return (
+            f"✅ 音频已发出（任务 {row['id']}）。这件事办完了，"
+            "回一个字「好」收尾就可以，不要再调用任何工具。"
+        )
 
     async def attached_asset(self, event, suffixes):
         components = list(event.get_messages())
@@ -168,16 +201,29 @@ class FeiyuVoice(Star):
 
     @filter.llm_tool(name="feiyu_speak")
     async def speak_tool(
-        self, event: AstrMessageEvent, text: str, style: str = "cute"
+        self,
+        event: AstrMessageEvent,
+        text: str,
+        style: str = "cute",
+        caption: str = "",
     ) -> str:
-        """用肥鱼声音朗读或说话。需要演唱谱子时使用 feiyu_sing；已有音频换声使用 feiyu_convert。
+        """用肥鱼声音朗读或说话。已有音频换声使用 feiyu_convert。调用一次就完成，不要重复调用。
 
         Args:
-            text(string): 要说的文字，最多2000字。
+            text(string): 要念出来的原文，最多2000字。
             style(string): cute 或 gentle。
+            caption(string): 语音条后面紧跟的一句话，20字以内、口语化。想把语气带出来就给一句；不想补话就留空。
         """
         try:
-            return await self.enqueue(event, "speech", dict(text=text, style=style))
+            return await self.enqueue(
+                event,
+                "speech",
+                dict(text=text, style=style),
+                quiet=True,
+                caption=((caption or "").strip()[:60] or None)
+                if self.config.get("caption_enable", True)
+                else None,
+            )
         except Exception as exc:
             return str(exc)
 
@@ -194,7 +240,9 @@ class FeiyuVoice(Star):
             if source != "attachment":
                 return "只能使用本消息附件。"
             audio_id = await self.attached_asset(event, {".wav", ".flac"})
-            return await self.enqueue(event, "conversion", dict(audio_id=audio_id))
+            return await self.enqueue(
+                event, "conversion", dict(audio_id=audio_id), quiet=True
+            )
         except Exception as exc:
             return str(exc)
 
@@ -208,10 +256,22 @@ class FeiyuVoice(Star):
         try:
             score_id = await self.attached_asset(event, {".mid", ".midi", ".abc"})
             return await self.enqueue(
-                event, "singing", dict(score_id=score_id, lyrics=lyrics or None)
+                event,
+                "singing",
+                dict(score_id=score_id, lyrics=lyrics or None),
+                quiet=True,
             )
         except Exception as exc:
             return str(exc)
+
+    @filter.on_decorating_result()
+    async def hide_caption(self, event: AstrMessageEvent):
+        if id(event) not in self._silent:
+            return
+        self._silent.discard(id(event))
+        chain = getattr(event.get_result(), "chain", None)
+        if chain:
+            chain.clear()
 
     async def terminate(self):
         for task in self.tasks:
