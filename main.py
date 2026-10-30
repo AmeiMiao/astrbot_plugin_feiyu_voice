@@ -12,9 +12,20 @@ from astrbot.core.star.filter.command import GreedyStr
 from .client import VoiceClient
 
 
-# 同一会话、同一类型、同一参数在该窗口内只提交一单。
+# 同一轮对话、同一类型、同一参数只提交一单。
 # 大模型可能在一轮里重复调用同一个工具，重复提交会合成并发送多份音频。
+# 轮次用入站消息 id 区分：不同的用户消息算两轮，用户隔几秒重复说同一句话不该被吞掉。
+# 窗口只负责回收陈旧记录，不承担去重语义。
 _DEDUPE_WINDOW = 20.0
+
+
+def _turn_key(event):
+    """一轮对话的标识：同一条用户消息里的多次工具调用共用一个值。"""
+    message_id = getattr(getattr(event, "message_obj", None), "message_id", None)
+    if message_id:
+        return str(message_id)
+    # 拿不到消息 id 时退化成事件对象本身：一轮里是同一个对象，跨轮必然不同。
+    return "event:%d" % id(event)
 
 
 @register("feiyu_voice", "kaiyuey03", "肥鱼说话、换声与按谱唱歌统一接口", "0.1.0")
@@ -94,13 +105,23 @@ class FeiyuVoice(Star):
             except Exception:
                 logger.exception("Feiyu failure notification could not be delivered")
 
+    def _live_job(self, job_id):
+        """这一单是否还值得拿来挡重复调用：还在路上，或者已经成功投递。
+
+        失败的任务既不在路上也没投递成功，重试应当放行，不能回一句「音频会照常发出」。
+        """
+        row = self.jobs.get(job_id)
+        if not row:
+            return False
+        return bool(row.get("pending") or row.get("delivered"))
+
     async def enqueue(self, event, kind, payload, caption=None):
         if not self.config.get("api_key"):
             raise ValueError("请先在插件配置中填写声音服务 API Key。")
         payload["voice"] = self.config.get("voice", "feiyu")
         origin = event.unified_msg_origin
         signature = json.dumps(
-            [origin, kind, payload], sort_keys=True, ensure_ascii=False
+            [_turn_key(event), origin, kind, payload], sort_keys=True, ensure_ascii=False
         )
         now = time.monotonic()
         for stale in [
@@ -111,12 +132,28 @@ class FeiyuVoice(Star):
             self._recent.pop(stale, None)
         previous = self._recent.get(signature)
         if previous:
-            return (
-                f"同一段语音已经提交过（任务 {previous[0]}），音频会照常发出，"
-                "不需要重复调用。"
-            )
-        row = await self.client.submit(kind, payload)
-        self._recent[signature] = (row["id"], now)
+            job_id = previous[0]
+            if job_id is None:
+                # 第一单还在提交，第二次调用撞在占位上
+                return "同一段语音正在提交，音频会照常发出，不需要重复调用。"
+            if self._live_job(job_id):
+                return (
+                    f"同一段语音已经提交过（任务 {job_id}），音频会照常发出，"
+                    "不需要重复调用。"
+                )
+            # 上一单失败或没投递出去：不构成重复，清掉记录重新提交
+            self._recent.pop(signature, None)
+        # 先占位再 await：检查与占位之间没有 await，并发的第二次调用只能看到占位。
+        reserved = (None, now)
+        self._recent[signature] = reserved
+        try:
+            row = await self.client.submit(kind, payload)
+        except BaseException:
+            # 只回收自己这个占位，避免把窗口过期后别人写进来的新记录一起删掉
+            if self._recent.get(signature) is reserved:
+                self._recent.pop(signature, None)
+            raise
+        self._recent[signature] = (row["id"], time.monotonic())
         self.jobs[row["id"]] = dict(origin=origin, pending=True, caption=caption)
         self.persist()
         self.watch(row["id"], origin)
