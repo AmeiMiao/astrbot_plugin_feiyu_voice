@@ -115,24 +115,40 @@ class FeiyuVoice(Star):
             return False
         return bool(row.get("pending") or row.get("delivered"))
 
+    def _prune(self, turn, now):
+        """回收陈旧记录，但放过当前轮次和在途任务。
+
+        只按时间清理会误伤：生成超过 _DEDUPE_WINDOW 时，同一轮再调一次
+        就会被当成新请求重新下单。所以这里先看轮次，再看那一单还在不在路上。
+        """
+        for key, item in list(self._recent.items()):
+            if now - item["at"] <= _DEDUPE_WINDOW:
+                continue
+            if item["turn"] == turn:
+                # 这一轮还没走完，状态留着；等跨轮了才轮到它过期
+                continue
+            if item["job"] is None:
+                # 占位由 submit 的异常分支负责回收，这里不动
+                continue
+            if (self.jobs.get(item["job"]) or {}).get("pending"):
+                # 还在生成，清掉就等于放行重复下单
+                continue
+            self._recent.pop(key, None)
+
     async def enqueue(self, event, kind, payload, caption=None):
         if not self.config.get("api_key"):
             raise ValueError("请先在插件配置中填写声音服务 API Key。")
         payload["voice"] = self.config.get("voice", "feiyu")
         origin = event.unified_msg_origin
+        turn = _turn_key(event)
         signature = json.dumps(
-            [_turn_key(event), origin, kind, payload], sort_keys=True, ensure_ascii=False
+            [turn, origin, kind, payload], sort_keys=True, ensure_ascii=False
         )
         now = time.monotonic()
-        for stale in [
-            key
-            for key, (_, stamp) in self._recent.items()
-            if now - stamp > _DEDUPE_WINDOW
-        ]:
-            self._recent.pop(stale, None)
+        self._prune(turn, now)
         previous = self._recent.get(signature)
         if previous:
-            job_id = previous[0]
+            job_id = previous["job"]
             if job_id is None:
                 # 第一单还在提交，第二次调用撞在占位上；此时还不知道成败，不做任何承诺
                 return "同一段语音正在提交，不需要重复调用。"
@@ -147,7 +163,7 @@ class FeiyuVoice(Star):
             # 上一单失败或没投递出去：不构成重复，清掉记录重新提交
             self._recent.pop(signature, None)
         # 先占位再 await：检查与占位之间没有 await，并发的第二次调用只能看到占位。
-        reserved = (None, now)
+        reserved = {"job": None, "at": now, "turn": turn}
         self._recent[signature] = reserved
         try:
             row = await self.client.submit(kind, payload)
@@ -156,7 +172,11 @@ class FeiyuVoice(Star):
             if self._recent.get(signature) is reserved:
                 self._recent.pop(signature, None)
             raise
-        self._recent[signature] = (row["id"], time.monotonic())
+        self._recent[signature] = {
+            "job": row["id"],
+            "at": time.monotonic(),
+            "turn": turn,
+        }
         self.jobs[row["id"]] = dict(origin=origin, pending=True, caption=caption)
         self.persist()
         self.watch(row["id"], origin)
