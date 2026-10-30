@@ -19,6 +19,11 @@ from .client import VoiceClient
 _DEDUPE_WINDOW = 20.0
 
 
+_ACK = {"speech": "好，说了。",
+        "conversion": "好，换好了。",
+        "singing": "好，唱了。"}
+
+
 def _turn_key(event):
     """一轮对话的标识：同一条用户消息里的多次工具调用共用一个值。"""
     message_id = getattr(getattr(event, "message_obj", None), "message_id", None)
@@ -154,10 +159,13 @@ class FeiyuVoice(Star):
         self.watch(row["id"], origin)
         if quiet:
             event._feiyu_quiet = True
-        return (
-            f"✅ 音频已发出（任务 {row['id']}）。这件事办完了，"
-            "回一个字「好」收尾就可以，不要再调用任何工具。"
-        )
+            # tool path: the return value is read by the model
+            return (
+                f"✅ 音频已发出（任务 {row['id']}）。这件事办完了，"
+                "回一个字「好」收尾就可以，不要再调用任何工具。"
+            )
+        # command path: the return value is sent to the user verbatim
+        return _ACK.get(kind, "好。")
 
     async def attached_asset(self, event, suffixes):
         components = list(event.get_messages())
