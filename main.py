@@ -134,11 +134,14 @@ class FeiyuVoice(Star):
         if previous:
             job_id = previous[0]
             if job_id is None:
-                # 第一单还在提交，第二次调用撞在占位上
-                return "同一段语音正在提交，音频会照常发出，不需要重复调用。"
+                # 第一单还在提交，第二次调用撞在占位上；此时还不知道成败，不做任何承诺
+                return "同一段语音正在提交，不需要重复调用。"
             if self._live_job(job_id):
+                row = self.jobs.get(job_id) or {}
+                if row.get("delivered"):
+                    return f"这条语音已经发过了（任务 {job_id}），不需要重复提交。"
                 return (
-                    f"同一段语音已经提交过（任务 {job_id}），音频会照常发出，"
+                    f"同一段语音已经提交过（任务 {job_id}），正在生成，"
                     "不需要重复调用。"
                 )
             # 上一单失败或没投递出去：不构成重复，清掉记录重新提交
