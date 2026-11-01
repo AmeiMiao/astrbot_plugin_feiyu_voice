@@ -1,6 +1,5 @@
 import asyncio
 import json
-import time
 from pathlib import Path
 
 import astrbot.api.message_components as Comp
@@ -14,20 +13,26 @@ from .client import VoiceClient
 
 # 同一轮对话、同一类型、同一参数只提交一单。
 # 大模型可能在一轮里重复调用同一个工具，重复提交会合成并发送多份音频。
-# 轮次用入站消息 id 区分：不同的用户消息算两轮，用户隔几秒重复说同一句话不该被吞掉。
-# 窗口只负责回收陈旧记录，不承担去重语义。
-_DEDUPE_WINDOW = 20.0
-
-
-
-
-def _turn_key(event):
-    """一轮对话的标识：同一条用户消息里的多次工具调用共用一个值。"""
-    message_id = getattr(getattr(event, "message_obj", None), "message_id", None)
-    if message_id:
-        return str(message_id)
-    # 拿不到消息 id 时退化成事件对象本身：一轮里是同一个对象，跨轮必然不同。
-    return "event:%d" % id(event)
+#
+# 去重状态挂在这一轮的事件对象上，不放在插件实例里。AstrBot 的
+# tool_loop_agent_runner 在 reset() 时绑定一次 run_context，之后每个工具调用
+# 都从 run_context.context.event 取事件，所以同一轮的多次调用拿到的是同一个
+# 对象，不同轮次必然不同。轮次结束、事件被回收，记录跟着消失，不需要清理。
+#
+# 放在插件级字典里按 20 秒窗口清理是不行的：A 轮语音已经投递、但 agent 还在
+# 跑，B 轮这时提交会触发全局清理，把 A 的记录当成陈旧数据删掉，A 再调一次就
+# 重新下单。投递状态只能说明音频结束，说明不了轮次结束 —— 只有事件知道。
+def _dedupe_cache(event):
+    """这一轮的去重表。挂在事件对象上，跟着轮次一起生灭。"""
+    cache = getattr(event, "_feiyu_seen", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        try:
+            event._feiyu_seen = cache
+        except Exception:
+            # 挂不上属性就只能退化成不去重：宁可漏拦，也不能误删别的轮次的记录
+            pass
+    return cache
 
 
 @register("feiyu_voice", "kaiyuey03", "肥鱼说话、换声与按谱唱歌统一接口", "0.1.0")
@@ -109,69 +114,57 @@ class FeiyuVoice(Star):
             return False
         return bool(row.get("pending") or row.get("delivered"))
 
-    def _prune(self, turn, now):
-        """回收陈旧记录，但放过当前轮次和在途任务。
-
-        只按时间清理会误伤：生成超过 _DEDUPE_WINDOW 时，同一轮再调一次
-        就被当成新请求重新下单。所以这里先看轮次，再看那一单还在不在路上。
-        """
-        cache = self.__dict__.setdefault("_recent", {})
-        for key, item in list(cache.items()):
-            if now - item["at"] <= _DEDUPE_WINDOW:
-                continue
-            if item["turn"] == turn:
-                # 这一轮还没走完，状态留着；等跨轮了才轮到它过期
-                continue
-            if item["job"] is None:
-                # 占位由 submit 的异常分支负责回收，这里不动
-                continue
-            if (self.jobs.get(item["job"]) or {}).get("pending"):
-                # 还在生成，清掉就等于放行重复下单
-                continue
-            cache.pop(key, None)
-
     async def enqueue(self, event, kind, payload, quiet=False, caption=None):
         if not self.config.get("api_key"):
             raise ValueError("请先在插件配置中填写声音服务 API Key。")
         payload["voice"] = self.config.get("voice", "feiyu")
         origin = event.unified_msg_origin
-        turn = _turn_key(event)
-        cache = self.__dict__.setdefault("_recent", {})
+        seen = _dedupe_cache(event)
         sig = json.dumps(
-            [turn, origin, kind, payload],
+            [origin, kind, payload],
             sort_keys=True,
             ensure_ascii=False,
         )
-        now = time.monotonic()
-        self._prune(turn, now)
-        dup = cache.get(sig)
+        dup = seen.get(sig)
         if dup:
             job_id = dup["job"]
             if job_id is None:
-                # 第一单还在提交，第二次调用撞在占位上
+                # 第一单还在提交，第二次调用撞在占位上；此时还不知道成败，不做任何承诺
                 if quiet:
                     event._feiyu_quiet = True
                 return "同一段语音正在提交，不用重复调用。"
             if self._live_job(job_id):
+                row = self.jobs.get(job_id) or {}
                 if quiet:
                     event._feiyu_quiet = True
+                    if row.get("delivered"):
+                        return (
+                            f"音频已经发出（任务 {job_id}），不用重发，也不用再确认。"
+                            "回一个字「好」收尾就可以。"
+                        )
+                    return (
+                        f"音频还在生成（任务 {job_id}），已经提交过了，不用再调一次。"
+                        "回一个字「好」收尾就可以。"
+                    )
+                # command path: 只回状态行，收尾指令不能泄漏给用户
                 return (
-                    f"音频已经发出（任务 {job_id}），不用重发，也不用再确认。"
-                    "回一个字「好」收尾就可以。"
+                    f"✅ 音频已发出（任务 {job_id}）"
+                    if row.get("delivered")
+                    else f"⏳ 音频生成中（任务 {job_id}）"
                 )
             # 上一单失败或没投递出去：不构成重复，清掉记录重新提交
-            cache.pop(sig, None)
+            seen.pop(sig, None)
         # 先占位再 await：检查与占位之间没有 await，并发的第二次调用只能看到占位
-        reserved = {"job": None, "at": now, "turn": turn}
-        cache[sig] = reserved
+        reserved = {"job": None}
+        seen[sig] = reserved
         try:
             row = await self.client.submit(kind, payload)
         except BaseException:
-            # 只回收自己这个占位，避免把窗口过期后别人写进来的新记录一起删掉
-            if cache.get(sig) is reserved:
-                cache.pop(sig, None)
+            # 只回收自己这个占位
+            if seen.get(sig) is reserved:
+                seen.pop(sig, None)
             raise
-        cache[sig] = {"job": row["id"], "at": time.monotonic(), "turn": turn}
+        seen[sig] = {"job": row["id"]}
         self.jobs[row["id"]] = dict(origin=origin, pending=True, caption=caption)
         self.persist()
         self.watch(row["id"], origin)
